@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Environment variables and secrets
+.env
+
+# Logs
+logs/
+*.log
+
+# Local data files
+data/*
+!data/
+!data/.gitkeep
+
+# Superset local runtime files
+superset/*
+!superset/
+!superset/requirements-local.txt
+
+# Large local installers
+AWSCLIV2.pkg
+
+# Airflow local/runtime files
+airflow.db
+standalone_admin_password.txt
+
+# IDE / editor
+.idea/
+.vscode/

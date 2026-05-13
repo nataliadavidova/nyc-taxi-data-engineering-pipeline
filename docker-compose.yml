@@ -1,0 +1,92 @@
+services:
+  postgres:
+    image: postgres:13
+    container_name: nyc_taxi_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: nyc_taxi_final_project-clickhouse-1
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  airflow:
+    build: .
+    container_name: nyc_taxi_airflow
+    depends_on:
+      - postgres
+      - clickhouse
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PYTHONPATH: /opt/airflow/jobs
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./jobs:/opt/airflow/jobs
+      - ./logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data
+    command: >
+      bash -c "
+      airflow db migrate &&
+      airflow users create
+        --username ${AIRFLOW_ADMIN_USERNAME}
+        --firstname Admin
+        --lastname User
+        --role Admin
+        --email admin@example.com
+        --password ${AIRFLOW_ADMIN_PASSWORD} || true &&
+      airflow scheduler &
+      airflow webserver --port 8080
+      "
+
+  superset:
+    image: apache/superset:latest
+    container_name: superset
+    depends_on:
+      - clickhouse
+    user: root
+    env_file:
+      - .env
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+    ports:
+      - "8088:8088"
+    volumes:
+      - ./superset:/app/superset_home
+      - ./superset/requirements-local.txt:/app/requirements-local.txt
+    command: >
+      /bin/bash -c "
+      uv pip install -r /app/requirements-local.txt --python /app/.venv/bin/python --link-mode=copy &&
+      superset db upgrade &&
+      superset fab create-admin
+        --username ${SUPERSET_ADMIN_USERNAME}
+        --firstname Admin
+        --lastname User
+        --email admin@example.com
+        --password ${SUPERSET_ADMIN_PASSWORD} || true &&
+      superset init &&
+      superset run -h 0.0.0.0 -p 8088
+      "
+
+volumes:
+  postgres_data:
+  clickhouse_data:
