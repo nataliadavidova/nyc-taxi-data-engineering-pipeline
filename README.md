@@ -282,19 +282,17 @@ NYC Taxi BI Dashboard
 
 ## Screenshots
 
-Screenshots should be added to:
+### Airflow Successful Pipeline Run
 
-```text
-screenshots/
-```
+![Airflow Successful Pipeline Run](screenshots/airflow_successful_run_graph.png)
 
-Recommended screenshots:
+### ClickHouse Gold Tables
 
-- Airflow DAG graph;
-- successful Airflow DAG run;
-- ClickHouse tables;
-- Superset dashboard;
-- example BI charts.
+![ClickHouse Gold Tables](screenshots/clickhouse_gold_tables.png)
+
+### Superset BI Dashboard
+
+![Superset BI Dashboard](screenshots/superset_dashboard.png)
 
 ## Future Improvements
 
