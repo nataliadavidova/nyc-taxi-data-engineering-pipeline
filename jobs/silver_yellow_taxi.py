@@ -28,10 +28,14 @@ from pyspark.sql.functions import (
 from config import (
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
-    BUCKET_NAME,
     S3_ENDPOINT,
     S3_REGION,
+    bad_records_yellow_path,
+    bronze_yellow_path,
+    quality_yellow_path,
+    silver_yellow_path,
     validate_config,
+    get_month_boundaries,
 )
 
 def create_spark_session() -> SparkSession:
@@ -57,16 +61,20 @@ def create_spark_session() -> SparkSession:
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
-    bronze_path = f"s3a://{BUCKET_NAME}/nyc_taxi/bronze/yellow/year={year}/month={month}"
-    silver_path = f"s3a://{BUCKET_NAME}/nyc_taxi/silver/yellow/year={year}/month={month}"
-    bad_records_path = f"s3a://{BUCKET_NAME}/nyc_taxi/bad_records/yellow/year={year}/month={month}"
-    quality_path = f"s3a://{BUCKET_NAME}/nyc_taxi/quality/yellow/year={year}/month={month}"
+    bronze_path = bronze_yellow_path(year, month)
+    silver_path = silver_yellow_path(year, month)
+    bad_records_path = bad_records_yellow_path(year, month)
+    quality_path = quality_yellow_path(year, month)
 
     print(f"Reading bronze: {bronze_path}")
     df = spark.read.parquet(bronze_path)
 
     total_count = df.count()
     print(f"Total rows: {total_count}")
+
+    month_start, next_month_start = get_month_boundaries(year, month)
+
+    print(f"Expected pickup date range: [{month_start}, {next_month_start})")
 
     # ======================
     # DATA QUALITY CHECKS
@@ -79,6 +87,14 @@ def main(year: str, month: str) -> None:
 
     dq_df = dq_df \
         .withColumn("dq_null_pickup", col("tpep_pickup_datetime").isNull()) \
+        .withColumn(
+            "dq_outside_month",
+            col("tpep_pickup_datetime").isNotNull()
+            & (
+                (to_date("tpep_pickup_datetime") < lit(month_start).cast("date"))
+                | (to_date("tpep_pickup_datetime") >= lit(next_month_start).cast("date"))
+            ),
+        ) \
         .withColumn("dq_null_dropoff", col("tpep_dropoff_datetime").isNull()) \
         .withColumn("dq_wrong_time", col("tpep_dropoff_datetime") <= col("tpep_pickup_datetime")) \
         .withColumn("dq_bad_distance", col("trip_distance") <= 0) \
@@ -132,6 +148,17 @@ def main(year: str, month: str) -> None:
         .drop(*dq_cols)
 
     silver_count = silver_df.count()
+
+    outside_month_count = silver_df.filter(
+        (col("pickup_date") < lit(month_start).cast("date"))
+        | (col("pickup_date") >= lit(next_month_start).cast("date"))
+    ).count()
+
+    if outside_month_count > 0:
+        raise ValueError(
+            f"Silver contains {outside_month_count} rows outside "
+            f"expected pickup date range [{month_start}, {next_month_start})"
+        )
 
     print(f"Clean rows: {silver_count}")
     print(f"Removed rows: {total_count - silver_count}")

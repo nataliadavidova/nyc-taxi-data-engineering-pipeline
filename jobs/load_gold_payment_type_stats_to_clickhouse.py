@@ -1,11 +1,8 @@
 """
-Loads Gold payment type stats mart from S3/Object Storage to ClickHouse.
+Load monthly gold payment type stats mart into ClickHouse.
 
-Source:
-s3a://<bucket>/nyc_taxi/gold/yellow/payment_type_stats/year=<year>/month=<month>
-
-Target:
-nyc_taxi.gold_payment_type_stats
+Reads the monthly gold parquet path from config.py and appends it
+to the ClickHouse gold_payment_type_stats table.
 """
 
 import argparse
@@ -13,17 +10,17 @@ import argparse
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import col
 
-from jobs.config import (
+from config import (
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
-    BUCKET_NAME,
+    CLICKHOUSE_DATABASE,
+    CLICKHOUSE_HOST,
+    CLICKHOUSE_PASSWORD,
+    CLICKHOUSE_PORT,
+    CLICKHOUSE_USER,
     S3_ENDPOINT,
     S3_REGION,
-    CLICKHOUSE_HOST,
-    CLICKHOUSE_PORT,
-    CLICKHOUSE_DATABASE,
-    CLICKHOUSE_USER,
-    CLICKHOUSE_PASSWORD,
+    gold_payment_type_stats_path,
     validate_config,
 )
 
@@ -47,16 +44,14 @@ def create_spark_session() -> SparkSession:
 def main(year_arg: str, month_arg: str) -> None:
     spark = create_spark_session()
 
-    gold_path = (
-        f"s3a://{BUCKET_NAME}/nyc_taxi/gold/yellow/payment_type_stats/"
-        f"year={year_arg}/month={month_arg}"
-    )
+    gold_path = gold_payment_type_stats_path(year_arg, month_arg)
 
     print(f"Reading Gold payment type stats from: {gold_path}")
 
     df = spark.read.parquet(gold_path)
 
     df = df.select(
+        col("pickup_date"),
         col("payment_type"),
         col("payment_type_name"),
         col("trips_count"),

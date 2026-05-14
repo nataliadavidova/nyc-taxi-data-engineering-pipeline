@@ -18,9 +18,10 @@ from pyspark.sql.functions import current_timestamp, lit
 from config import (
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
-    BUCKET_NAME,
     S3_ENDPOINT,
     S3_REGION,
+    bronze_yellow_path,
+    raw_yellow_path,
     validate_config,
 )
 
@@ -47,15 +48,8 @@ def create_spark_session() -> SparkSession:
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
-    input_path = (
-        f"s3a://{BUCKET_NAME}/nyc_taxi/raw/yellow/"
-        f"year={year}/month={month}/yellow_tripdata_{year}-{month}.parquet"
-    )
-
-    output_path = (
-        f"s3a://{BUCKET_NAME}/nyc_taxi/bronze/yellow/"
-        f"year={year}/month={month}"
-    )
+    input_path = raw_yellow_path(year, month)
+    output_path = bronze_yellow_path(year, month)
 
     print(f"Reading raw data from: {input_path}")
 

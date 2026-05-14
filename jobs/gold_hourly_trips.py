@@ -17,9 +17,10 @@ from pyspark.sql.functions import avg, col, count, current_timestamp, round, sum
 from config import (
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
-    BUCKET_NAME,
     S3_ENDPOINT,
     S3_REGION,
+    gold_hourly_trips_path,
+    silver_yellow_path,
     validate_config,
 )
 
@@ -48,8 +49,8 @@ def create_spark_session() -> SparkSession:
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
-    silver_path = f"s3a://{BUCKET_NAME}/nyc_taxi/silver/yellow/year={year}/month={month}"
-    gold_path = f"s3a://{BUCKET_NAME}/nyc_taxi/gold/yellow/hourly_trips/year={year}/month={month}"
+    silver_path = silver_yellow_path(year, month)
+    gold_path = gold_hourly_trips_path(year, month)
 
     print(f"Reading silver data from: {silver_path}")
 

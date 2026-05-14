@@ -10,9 +10,10 @@ from pyspark.sql.functions import avg, col, count, current_timestamp, lit, round
 from config import (
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
-    BUCKET_NAME,
     S3_ENDPOINT,
     S3_REGION,
+    gold_payment_type_stats_path,
+    silver_yellow_path,
     validate_config,
 )
 
@@ -41,8 +42,8 @@ def create_spark_session() -> SparkSession:
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
-    silver_path = f"s3a://{BUCKET_NAME}/nyc_taxi/silver/yellow/year={year}/month={month}"
-    gold_path = f"s3a://{BUCKET_NAME}/nyc_taxi/gold/yellow/payment_type_stats/year={year}/month={month}"
+    silver_path = silver_yellow_path(year, month)
+    gold_path = gold_payment_type_stats_path(year, month)
 
     print(f"Reading silver data from: {silver_path}")
 
@@ -63,7 +64,7 @@ def main(year: str, month: str) -> None:
 
     gold_df = (
         enriched_df
-        .groupBy("payment_type", "payment_type_name")
+        .groupBy("pickup_date", "payment_type", "payment_type_name")
         .agg(
             count("*").alias("trips_count"),
             round(sum("total_amount"), 2).alias("total_revenue"),
@@ -75,10 +76,10 @@ def main(year: str, month: str) -> None:
                 4,
             ).alias("tips_share_from_revenue"),
         )
-        .withColumn("year", lit(year))
-        .withColumn("month", lit(month))
+        .withColumn("year", col("pickup_date").substr(1, 4))
+        .withColumn("month", col("pickup_date").substr(6, 2))
         .withColumn("gold_load_timestamp", current_timestamp())
-        .orderBy(col("trips_count").desc())
+        .orderBy("pickup_date", col("trips_count").desc())
     )
 
     print("Gold payment type preview:")
