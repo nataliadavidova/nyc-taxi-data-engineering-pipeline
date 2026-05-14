@@ -1,22 +1,41 @@
 # NYC Taxi Data Engineering Pipeline
 
-End-to-end data engineering project for processing NYC Taxi trip data using a medallion architecture, Spark ETL jobs, Airflow orchestration, ClickHouse as an analytical serving layer, and Superset for BI dashboards.
+End-to-end data engineering project for processing NYC Yellow Taxi trip data using a medallion architecture, Apache Spark ETL jobs, Airflow orchestration, ClickHouse as an analytical serving layer, and Apache Superset for BI dashboards.
+
+The pipeline processes NYC Yellow Taxi data for the full year 2024 and builds analytical marts for trips, revenue, hourly demand, payment behavior, and popular pickup/dropoff routes.
 
 ## Project Overview
 
 The goal of this project is to build a production-like batch data pipeline for NYC Taxi data.
 
-The pipeline processes raw taxi trip data, cleans and transforms it into analytical layers, builds business-level gold marts, loads them into ClickHouse, and exposes the data through a Superset BI dashboard.
+The pipeline ingests raw taxi trip data from S3-compatible object storage, cleans and validates the data, builds business-ready analytical marts, loads them into ClickHouse, and exposes the results through a Superset BI dashboard.
 
 This project demonstrates core data engineering practices:
 
 - batch data processing with Apache Spark;
-- medallion architecture: bronze, silver, gold;
+- medallion architecture: raw, bronze, silver, gold;
 - workflow orchestration with Apache Airflow;
+- data quality checks and validation gates;
 - analytical storage with ClickHouse;
 - BI visualization with Apache Superset;
 - Docker-based local infrastructure;
-- data quality checks and schema validation.
+- centralized configuration and reusable path helpers;
+- full-year historical data processing.
+
+## Business Value
+
+The resulting BI dashboard helps analyze NYC Yellow Taxi operations across the full year 2024.
+
+The dashboard answers questions such as:
+
+- how many trips were completed during a selected period;
+- how total revenue changed over time;
+- what hours have the highest taxi demand;
+- which payment types are most commonly used;
+- which pickup and dropoff zones form the most popular routes;
+- how average check differs by payment type and route.
+
+This type of pipeline can be used as a foundation for transportation analytics, demand monitoring, revenue analysis, and operational reporting.
 
 ## Tech Stack
 
@@ -30,6 +49,36 @@ This project demonstrates core data engineering practices:
 - Parquet
 - S3-compatible Object Storage
 
+## Architecture
+
+```text
+S3-compatible Object Storage
+        │
+        ▼
+Raw Layer
+        │
+        ▼
+Bronze Layer
+        │
+        ▼
+Silver Layer + Data Quality Checks
+        │
+        ▼
+Gold Analytical Marts
+        │
+        ▼
+ClickHouse Serving Layer
+        │
+        ▼
+Superset BI Dashboard
+```
+
+The pipeline follows a medallion architecture:
+
+```text
+raw → bronze → silver → gold → ClickHouse → Superset
+```
+
 ## Project Structure
 
 ```text
@@ -40,33 +89,51 @@ nyc_taxi_final_project/
 │   ├── config.py
 │   ├── bronze_yellow_taxi.py
 │   ├── silver_yellow_taxi.py
+│   ├── check_yellow_taxi_quality.py
 │   ├── gold_daily_trips.py
 │   ├── gold_hourly_trips.py
 │   ├── gold_location_pair_stats.py
 │   ├── gold_payment_type_stats.py
+│   ├── check_gold_schema.py
 │   ├── load_gold_daily_trips_to_clickhouse.py
 │   ├── load_gold_hourly_trips_to_clickhouse.py
 │   ├── load_gold_location_pair_stats_to_clickhouse.py
 │   ├── load_gold_payment_type_stats_to_clickhouse.py
-│   ├── check_gold_schema.py
-│   └── check_yellow_taxi_quality.py
+│   └── truncate_clickhouse_gold_tables.py
 ├── data/
 ├── docs/
 ├── screenshots/
-├── sql/
 ├── superset/
 ├── Dockerfile
 ├── docker-compose.yml
+├── .env.example
 └── README.md
+```
+
+## Data Source
+
+The project uses NYC Yellow Taxi trip records in Parquet format.
+
+The raw data is stored in S3-compatible object storage using the following structure:
+
+```text
+nyc_taxi/raw/yellow/year=2024/month=01/yellow_tripdata_2024-01.parquet
+nyc_taxi/raw/yellow/year=2024/month=02/yellow_tripdata_2024-02.parquet
+...
+nyc_taxi/raw/yellow/year=2024/month=12/yellow_tripdata_2024-12.parquet
+```
+
+A taxi zone lookup file is also used to enrich pickup and dropoff location IDs with readable zone names:
+
+```text
+nyc_taxi/raw/lookup/taxi_zone_lookup.csv
 ```
 
 ## Data Pipeline
 
-The pipeline follows a medallion architecture.
-
 ### Raw Layer
 
-The raw layer contains the original NYC Taxi trip data in Parquet format.
+The raw layer contains the original NYC Yellow Taxi trip data in Parquet format.
 
 ### Bronze Layer
 
@@ -76,7 +143,14 @@ The bronze layer is created by:
 jobs/bronze_yellow_taxi.py
 ```
 
-This layer stores the ingested source data with minimal transformations.
+This layer stores ingested source data with minimal transformations and technical metadata.
+
+Main additions:
+
+- load timestamp;
+- source system;
+- source year;
+- source month.
 
 ### Silver Layer
 
@@ -90,10 +164,16 @@ This layer contains cleaned and standardized taxi trip data.
 
 Typical transformations include:
 
-- selecting required columns;
-- casting columns to proper data types;
-- filtering invalid records;
-- preparing data for analytical aggregation.
+- calculating trip duration;
+- extracting pickup date;
+- extracting pickup hour;
+- extracting pickup month;
+- classifying trips into short, medium, and long;
+- removing invalid records;
+- writing bad records separately;
+- writing a quality report.
+
+The silver layer is partitioned by year and month.
 
 ### Gold Layer
 
@@ -108,6 +188,46 @@ jobs/gold_location_pair_stats.py
 jobs/gold_payment_type_stats.py
 ```
 
+Each gold mart is written to S3-compatible object storage and then loaded into ClickHouse.
+
+## Data Quality Checks
+
+The project includes data quality and validation jobs:
+
+```text
+jobs/check_yellow_taxi_quality.py
+jobs/check_gold_schema.py
+```
+
+### Silver Data Quality Checks
+
+The silver job validates records using checks such as:
+
+- pickup datetime is not null;
+- dropoff datetime is not null;
+- dropoff datetime is greater than pickup datetime;
+- trip distance is positive;
+- fare amount is not negative;
+- total amount is not negative;
+- passenger count is valid;
+- trip duration is positive and not unrealistically long;
+- trip distance is not an extreme outlier;
+- pickup date belongs to the expected processing month.
+
+The monthly pickup date check prevents records from a wrong date range from entering the silver layer.
+
+For example, when processing January 2024, the allowed pickup date range is:
+
+```text
+2024-01-01 <= pickup_date < 2024-02-01
+```
+
+Invalid records are written to the bad records layer.
+
+### Gold Validation
+
+The gold schema check validates that gold marts were successfully written and can be read by Spark.
+
 ## Gold Marts
 
 The following gold marts are created and loaded into ClickHouse.
@@ -116,43 +236,98 @@ The following gold marts are created and loaded into ClickHouse.
 
 Daily trip metrics.
 
+Main fields:
+
+- `pickup_date`
+- `trips_count`
+- `total_revenue`
+- `avg_check`
+- `avg_trip_distance`
+- `avg_trip_duration_minutes`
+- `short_trips_count`
+- `medium_trips_count`
+- `long_trips_count`
+
 Main use cases:
 
 - daily trip volume;
 - daily revenue;
 - average check;
 - average trip distance;
-- average trip duration.
+- average trip duration;
+- trip type distribution.
 
 ### `gold_hourly_trips`
 
 Hourly demand analytics.
 
+Main fields:
+
+- `pickup_date`
+- `pickup_hour`
+- `trips_count`
+- `total_revenue`
+- `avg_check`
+- `avg_trip_distance`
+- `avg_trip_duration_minutes`
+
 Main use cases:
 
 - trips by hour of day;
 - demand distribution throughout the day;
-- peak hour analysis.
+- peak hour analysis;
+- hourly revenue analysis.
 
 ### `gold_location_pair_stats`
 
 Pickup and dropoff location pair statistics.
 
+Main fields:
+
+- `pickup_date`
+- `pickup_location_id`
+- `pickup_zone`
+- `pickup_borough`
+- `pickup_service_zone`
+- `dropoff_location_id`
+- `dropoff_zone`
+- `dropoff_borough`
+- `dropoff_service_zone`
+- `trips_count`
+- `total_revenue`
+- `avg_check`
+- `avg_trip_distance`
+- `avg_trip_duration_minutes`
+
 Main use cases:
 
 - top routes by number of trips;
 - top routes by revenue;
-- route-level demand analysis.
+- route-level demand analysis;
+- pickup/dropoff zone analysis.
 
 ### `gold_payment_type_stats`
 
 Payment type analytics.
 
+Main fields:
+
+- `pickup_date`
+- `payment_type`
+- `payment_type_name`
+- `trips_count`
+- `total_revenue`
+- `avg_check`
+- `total_tips`
+- `avg_tip`
+- `tips_share_from_revenue`
+
 Main use cases:
 
 - trips by payment type;
 - revenue by payment type;
-- average check by payment type.
+- average check by payment type;
+- tips analysis.
 
 ## ClickHouse Serving Layer
 
@@ -180,7 +355,39 @@ jobs/load_gold_location_pair_stats_to_clickhouse.py
 jobs/load_gold_payment_type_stats_to_clickhouse.py
 ```
 
-ClickHouse is used as an analytical serving layer for fast BI queries.
+Before a full refresh, the DAG runs:
+
+```text
+jobs/truncate_clickhouse_gold_tables.py
+```
+
+This prevents duplicate data in ClickHouse when the full-year pipeline is rerun.
+
+ClickHouse is used as an analytical serving layer for fast BI queries from Superset.
+
+## Final ClickHouse Output
+
+After processing the full year 2024, the ClickHouse gold tables contain the following date range:
+
+```text
+2024-01-01 → 2024-12-31
+```
+
+Final row counts:
+
+```text
+gold_daily_trips              366
+gold_hourly_trips             8783
+gold_payment_type_stats       1830
+gold_location_pair_stats      2857013
+```
+
+The `gold_location_pair_stats` mart is enriched with readable taxi zone names, for example:
+
+```text
+237 → Upper East Side South
+236 → Upper East Side North
+```
 
 ## Airflow Orchestration
 
@@ -192,22 +399,28 @@ DAG file:
 dags/nyc_taxi_pipeline.py
 ```
 
-The DAG runs the full pipeline:
+The DAG processes all months of 2024 and runs the full pipeline:
 
 ```text
-bronze → silver → gold marts → ClickHouse load → validation
+truncate ClickHouse gold tables
+        │
+        ▼
+bronze monthly jobs
+        │
+        ▼
+silver monthly jobs
+        │
+        ▼
+quality checks
+        │
+        ▼
+gold marts
+        │
+        ▼
+load gold marts to ClickHouse
 ```
 
-## Data Quality Checks
-
-The project includes data quality and validation jobs:
-
-```text
-jobs/check_yellow_taxi_quality.py
-jobs/check_gold_schema.py
-```
-
-These checks help validate the pipeline output and ensure that the generated analytical marts are suitable for downstream reporting.
+Airflow is used to manage task dependencies, retries, and execution visibility.
 
 ## Superset BI Dashboard
 
@@ -232,15 +445,39 @@ Dashboard name:
 NYC Taxi BI Dashboard
 ```
 
+The dashboard includes a date filter based on `pickup_date`, so all charts can be filtered by reporting period.
+
 ## How to Run Locally
 
-### 1. Start infrastructure
+### 1. Configure Environment Variables
+
+Create a local `.env` file using `.env.example` as a template.
+
+Required configuration includes:
+
+- object storage bucket;
+- S3-compatible endpoint;
+- object storage credentials;
+- ClickHouse credentials;
+- Airflow admin credentials;
+- Superset admin credentials;
+- Superset secret key;
+- Airflow webserver secret key.
+
+### 2. Start Infrastructure
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-### 2. Open Airflow
+This starts:
+
+- PostgreSQL for Airflow metadata;
+- Airflow webserver and scheduler;
+- ClickHouse;
+- Superset.
+
+### 3. Open Airflow
 
 ```text
 http://localhost:8080
@@ -252,7 +489,7 @@ Run the DAG:
 nyc_taxi_pipeline
 ```
 
-### 3. Open ClickHouse
+### 4. Open ClickHouse
 
 ClickHouse HTTP interface:
 
@@ -268,7 +505,7 @@ FROM nyc_taxi.gold_daily_trips
 LIMIT 10;
 ```
 
-### 4. Open Superset
+### 5. Open Superset
 
 ```text
 http://localhost:8088
@@ -278,6 +515,12 @@ Open dashboard:
 
 ```text
 NYC Taxi BI Dashboard
+```
+
+If table schemas change, refresh Superset datasets:
+
+```text
+Data → Datasets → Edit dataset → Columns → Sync columns from source → Save
 ```
 
 ## Screenshots
@@ -298,10 +541,12 @@ NYC Taxi BI Dashboard
 
 Possible future improvements:
 
-- add incremental processing;
+- add explicit ClickHouse table creation scripts;
+- add incremental processing by month or partition;
 - add more data quality checks;
 - add automated tests for Spark jobs;
-- add CI/CD pipeline;
+- add DAG import tests;
+- add CI/CD pipeline with GitHub Actions;
 - add dbt layer for analytical transformations;
-- enrich location IDs with taxi zone names;
-- improve dashboard filters and cross-filtering.
+- improve Superset dashboard cross-filtering;
+- add monitoring and alerting for pipeline failures.
