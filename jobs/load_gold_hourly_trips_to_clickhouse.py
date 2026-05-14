@@ -1,11 +1,8 @@
 """
-Loads Gold hourly trips mart from S3/Object Storage to ClickHouse.
+Load monthly gold hourly trips mart into ClickHouse.
 
-Source:
-s3a://<bucket>/nyc_taxi/gold/yellow/hourly_trips/year=<year>/month=<month>
-
-Target:
-nyc_taxi.gold_hourly_trips
+Reads the monthly gold parquet path from config.py and appends it
+to the ClickHouse gold_hourly_trips table.
 """
 
 import argparse
@@ -16,14 +13,14 @@ from pyspark.sql.functions import col
 from config import (
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
-    BUCKET_NAME,
+    CLICKHOUSE_DATABASE,
+    CLICKHOUSE_HOST,
+    CLICKHOUSE_PASSWORD,
+    CLICKHOUSE_PORT,
+    CLICKHOUSE_USER,
     S3_ENDPOINT,
     S3_REGION,
-    CLICKHOUSE_HOST,
-    CLICKHOUSE_PORT,
-    CLICKHOUSE_DATABASE,
-    CLICKHOUSE_USER,
-    CLICKHOUSE_PASSWORD,
+    gold_hourly_trips_path,
     validate_config,
 )
 
@@ -47,10 +44,7 @@ def create_spark_session() -> SparkSession:
 def main(year_arg: str, month_arg: str) -> None:
     spark = create_spark_session()
 
-    gold_path = (
-        f"s3a://{BUCKET_NAME}/nyc_taxi/gold/yellow/hourly_trips/"
-        f"year={year_arg}/month={month_arg}"
-    )
+    gold_path = gold_hourly_trips_path(year_arg, month_arg)
 
     print(f"Reading Gold hourly trips from: {gold_path}")
 

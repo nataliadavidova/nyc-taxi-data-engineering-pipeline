@@ -24,12 +24,49 @@ services:
     volumes:
       - clickhouse_data:/var/lib/clickhouse
 
+  airflow-init:
+    build: .
+    container_name: nyc_taxi_airflow_init
+    depends_on:
+      - postgres
+      - clickhouse
+    env_file:
+      - .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      PYTHONPATH: /opt/airflow/jobs
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./jobs:/opt/airflow/jobs
+      - ./logs:/opt/airflow/logs
+      - ./data:/opt/airflow/data
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+
+        airflow db migrate
+
+        airflow users create \
+          --username "$${AIRFLOW_ADMIN_USERNAME}" \
+          --firstname Admin \
+          --lastname User \
+          --role Admin \
+          --email admin@example.com \
+          --password "$${AIRFLOW_ADMIN_PASSWORD}" \
+        || airflow users reset-password \
+          -u "$${AIRFLOW_ADMIN_USERNAME}" \
+          -p "$${AIRFLOW_ADMIN_PASSWORD}"
+
   airflow:
     build: .
     container_name: nyc_taxi_airflow
     depends_on:
-      - postgres
-      - clickhouse
+      airflow-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
@@ -46,14 +83,6 @@ services:
       - ./data:/opt/airflow/data
     command: >
       bash -c "
-      airflow db migrate &&
-      airflow users create
-        --username ${AIRFLOW_ADMIN_USERNAME}
-        --firstname Admin
-        --lastname User
-        --role Admin
-        --email admin@example.com
-        --password ${AIRFLOW_ADMIN_PASSWORD} || true &&
       airflow scheduler &
       airflow webserver --port 8080
       "

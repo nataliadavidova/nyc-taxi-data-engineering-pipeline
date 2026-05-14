@@ -5,14 +5,16 @@ Gold job: pickup/dropoff location pair statistics.
 import argparse
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, col, count, current_timestamp, lit, round, sum
+from pyspark.sql.functions import avg, broadcast, col, count, current_timestamp, round, sum
 
 from config import (
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
-    BUCKET_NAME,
     S3_ENDPOINT,
     S3_REGION,
+    gold_location_pair_stats_path,
+    silver_yellow_path,
+    taxi_zone_lookup_path,
     validate_config,
 )
 
@@ -41,8 +43,8 @@ def create_spark_session() -> SparkSession:
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
-    silver_path = f"s3a://{BUCKET_NAME}/nyc_taxi/silver/yellow/year={year}/month={month}"
-    gold_path = f"s3a://{BUCKET_NAME}/nyc_taxi/gold/yellow/location_pair_stats/year={year}/month={month}"
+    silver_path = silver_yellow_path(year, month)
+    gold_path = gold_location_pair_stats_path(year, month)
 
     print(f"Reading silver data from: {silver_path}")
 
@@ -50,9 +52,19 @@ def main(year: str, month: str) -> None:
 
     print(f"Silver rows count: {silver_df.count()}")
 
-    gold_df = (
+    lookup_path = taxi_zone_lookup_path()
+
+    print(f"Reading taxi zone lookup from: {lookup_path}")
+
+    zones_df = (
+        spark.read
+        .option("header", "true")
+        .csv(lookup_path)
+    )
+
+    aggregated_df = (
         silver_df
-        .groupBy("PULocationID", "DOLocationID")
+        .groupBy("pickup_date", "PULocationID", "DOLocationID")
         .agg(
             count("*").alias("trips_count"),
             round(sum("total_amount"), 2).alias("total_revenue"),
@@ -60,10 +72,46 @@ def main(year: str, month: str) -> None:
             round(avg("trip_distance"), 2).alias("avg_trip_distance"),
             round(avg("trip_duration_minutes"), 2).alias("avg_trip_duration_minutes"),
         )
-        .withColumn("year", lit(year))
-        .withColumn("month", lit(month))
+    )
+
+    pickup_zones_df = (
+        zones_df
+        .select(
+            col("LocationID").cast("int").alias("pickup_location_id"),
+            col("Borough").alias("pickup_borough"),
+            col("Zone").alias("pickup_zone"),
+            col("service_zone").alias("pickup_service_zone"),
+        )
+    )
+
+    dropoff_zones_df = (
+        zones_df
+        .select(
+            col("LocationID").cast("int").alias("dropoff_location_id"),
+            col("Borough").alias("dropoff_borough"),
+            col("Zone").alias("dropoff_zone"),
+            col("service_zone").alias("dropoff_service_zone"),
+        )
+    )
+
+    gold_df = (
+        aggregated_df
+        .withColumnRenamed("PULocationID", "pickup_location_id")
+        .withColumnRenamed("DOLocationID", "dropoff_location_id")
+        .join(
+            broadcast(pickup_zones_df),
+            on="pickup_location_id",
+            how="left",
+        )
+        .join(
+            broadcast(dropoff_zones_df),
+            on="dropoff_location_id",
+            how="left",
+        )
+        .withColumn("year", col("pickup_date").substr(1, 4))
+        .withColumn("month", col("pickup_date").substr(6, 2))
         .withColumn("gold_load_timestamp", current_timestamp())
-        .orderBy(col("trips_count").desc())
+        .orderBy("pickup_date", col("trips_count").desc())
     )
 
     print("Gold location pair preview:")

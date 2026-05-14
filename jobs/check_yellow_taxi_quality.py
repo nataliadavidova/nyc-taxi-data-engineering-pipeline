@@ -13,15 +13,17 @@ Data Quality check для NYC Taxi pipeline.
 import argparse
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, year, month
+from pyspark.sql.functions import col, year, month, lit
 
 from config import (
     AWS_ACCESS_KEY_ID,
     AWS_SECRET_ACCESS_KEY,
-    BUCKET_NAME,
     S3_ENDPOINT,
     S3_REGION,
+    bronze_yellow_path,
+    silver_yellow_path,
     validate_config,
+    get_month_boundaries,
 )
 
 
@@ -44,21 +46,29 @@ def create_spark_session() -> SparkSession:
 def main(year_arg: str, month_arg: str) -> None:
     spark = create_spark_session()
 
-    bronze_path = (
-        f"s3a://{BUCKET_NAME}/nyc_taxi/bronze/yellow/"
-        f"year={year_arg}/month={month_arg}"
-    )
-
-    silver_path = (
-        f"s3a://{BUCKET_NAME}/nyc_taxi/silver/yellow/"
-        f"year={year_arg}/month={month_arg}"
-    )
+    bronze_path = bronze_yellow_path(year_arg, month_arg)
+    silver_path = silver_yellow_path(year_arg, month_arg)
 
     print(f"Reading Bronze from: {bronze_path}")
     bronze_df = spark.read.parquet(bronze_path)
 
     print(f"Reading Silver from: {silver_path}")
     silver_df = spark.read.parquet(silver_path)
+
+    month_start, next_month_start = get_month_boundaries(year_arg, month_arg)
+
+    outside_month_count = silver_df.filter(
+        (col("pickup_date") < lit(month_start).cast("date"))
+        | (col("pickup_date") >= lit(next_month_start).cast("date"))
+    ).count()
+
+    print(f"Silver rows outside expected month: {outside_month_count}")
+
+    if outside_month_count > 0:
+        raise ValueError(
+            f"Silver contains {outside_month_count} rows outside "
+            f"expected pickup date range [{month_start}, {next_month_start})"
+        )
 
     bronze_count = bronze_df.count()
     silver_count = silver_df.count()
