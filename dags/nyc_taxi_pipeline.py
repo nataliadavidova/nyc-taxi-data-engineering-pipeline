@@ -68,7 +68,7 @@ with DAG(
     dag_id="nyc_taxi_pipeline",
     default_args=default_args,
     start_date=datetime(2024, 1, 1),
-    schedule_interval=None,
+    schedule=None,
     catchup=False,
     tags=["nyc_taxi", "spark", "data_engineering"],
 ) as dag:
