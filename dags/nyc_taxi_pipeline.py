@@ -89,6 +89,14 @@ with DAG(
         """,
     )
 
+    check_clickhouse_gold_quality = BashOperator(
+        task_id="check_clickhouse_gold_quality",
+        bash_command=f"""
+        cd {PROJECT_DIR} &&
+        PYTHONPATH={JOBS_DIR} python jobs/check_clickhouse_gold_quality.py
+        """,
+    )
+
     create_clickhouse_gold_tables >> truncate_clickhouse_gold_tables
 
     previous_month_final_tasks = [truncate_clickhouse_gold_tables]
@@ -180,3 +188,5 @@ with DAG(
             load_gold_payment,
             load_gold_location,
         ]
+
+    previous_month_final_tasks >> check_clickhouse_gold_quality
