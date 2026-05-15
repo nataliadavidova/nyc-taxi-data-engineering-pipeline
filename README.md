@@ -85,6 +85,9 @@ raw → bronze → silver → gold → ClickHouse → Superset
 nyc_taxi_final_project/
 ├── dags/
 │   └── nyc_taxi_pipeline.py
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── jobs/
 │   ├── config.py
 │   ├── bronze_yellow_taxi.py
@@ -457,7 +460,7 @@ NYC Taxi BI Dashboard
 
 The dashboard includes a date filter based on `pickup_date`, so all charts can be filtered by reporting period.
 
-## Automated Tests
+## Automated Tests and CI
 
 The project includes automated tests for configuration helpers and Airflow DAG structure.
 
@@ -467,6 +470,7 @@ Test files:
 tests/test_config.py
 tests/test_dag.py
 ```
+
 ### `test_config.py`
 
 This test module validates project configuration logic:
@@ -496,7 +500,7 @@ Run tests locally:
 python -m pytest tests -v
 ```
 
-Run DAG tests inside the Airflow container:
+Run tests inside the Airflow container:
 
 ```bash
 docker exec -it nyc_taxi_airflow bash -lc '
@@ -504,6 +508,30 @@ cd /opt/airflow &&
 PYTHONPATH=/opt/airflow/jobs python -m pytest tests -v
 '
 ```
+
+### GitHub Actions CI
+
+The project uses GitHub Actions to run automated checks on push and pull request.
+
+Workflow file:
+
+```text
+.github/workflows/ci.yml
+```
+
+The CI pipeline runs:
+
+- Python syntax check for DAG and job files;
+- automated tests with `pytest`;
+- Airflow DAG structure tests.
+
+CI command:
+
+```bash
+PYTHONPATH=jobs python -m pytest tests -v
+```
+
+This helps ensure that changes do not break configuration helpers, Airflow DAG imports, or task dependencies before they are merged into `main`.
 
 ## How to Run Locally
 
@@ -602,7 +630,6 @@ Possible future improvements:
 - add Spark transformation unit tests with small sample datasets;
 - add incremental processing by month or partition;
 - add more data quality checks;
-- add CI/CD pipeline with GitHub Actions;
 - add ClickHouse schema migration/versioning approach;
 - add dbt layer for analytical transformations;
 - improve Superset dashboard cross-filtering;
