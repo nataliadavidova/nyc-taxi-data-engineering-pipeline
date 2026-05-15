@@ -93,12 +93,13 @@ nyc_taxi_final_project/
 │   ├── bronze_yellow_taxi.py
 │   ├── create_clickhouse_gold_tables.py
 │   ├── silver_yellow_taxi.py
+│   ├── check_gold_schema.py
 │   ├── check_yellow_taxi_quality.py
+│   ├── check_clickhouse_gold_quality.py
 │   ├── gold_daily_trips.py
 │   ├── gold_hourly_trips.py
 │   ├── gold_location_pair_stats.py
 │   ├── gold_payment_type_stats.py
-│   ├── check_gold_schema.py
 │   ├── load_gold_daily_trips_to_clickhouse.py
 │   ├── load_gold_hourly_trips_to_clickhouse.py
 │   ├── load_gold_location_pair_stats_to_clickhouse.py
@@ -204,6 +205,7 @@ The project includes data quality and validation jobs:
 ```text
 jobs/check_yellow_taxi_quality.py
 jobs/check_gold_schema.py
+jobs/check_clickhouse_gold_quality.py
 ```
 
 ### Silver Data Quality Checks
@@ -231,9 +233,25 @@ For example, when processing January 2024, the allowed pickup date range is:
 
 Invalid records are written to the bad records layer.
 
-### Gold Validation
+### Gold Object Storage Validation
 
-The gold schema check validates that gold marts were successfully written and can be read by Spark.
+The gold schema check validates that gold marts were successfully written to S3-compatible Object Storage and can be read by Spark.
+
+This check helps catch issues before loading gold marts into ClickHouse.
+
+### ClickHouse Gold Quality Checks
+
+The final ClickHouse quality check validates the analytical serving layer after all gold marts have been loaded into ClickHouse.
+
+It checks that:
+
+- all ClickHouse gold tables exist;
+- all ClickHouse gold tables are not empty;
+- `pickup_date` covers the expected full-year range from `2024-01-01` to `2024-12-31`;
+- `gold_location_pair_stats` has non-empty pickup and dropoff zone names;
+- `gold_payment_type_stats` has non-empty payment type names.
+
+This check acts as a final quality gate before the data is considered ready for BI reporting in Superset.
 
 ## Gold Marts
 
@@ -361,6 +379,21 @@ jobs/load_gold_hourly_trips_to_clickhouse.py
 jobs/load_gold_location_pair_stats_to_clickhouse.py
 jobs/load_gold_payment_type_stats_to_clickhouse.py
 ```
+After all monthly gold marts are loaded into ClickHouse, the DAG runs a final quality check:
+
+```text
+jobs/check_clickhouse_gold_quality.py
+```
+
+This job validates that the ClickHouse serving layer is ready for BI usage:
+
+- tables exist;
+- tables are not empty;
+- date ranges are correct;
+- enriched location names are populated;
+- payment type names are populated.
+
+If any of these checks fail, the Airflow DAG fails as well.
 
 Before a full refresh, the DAG runs two ClickHouse preparation steps:
 
@@ -430,8 +463,13 @@ gold marts
         │
         ▼
 load gold marts to ClickHouse
+        │
+        ▼
+check ClickHouse gold quality
 ```
 The DAG first ensures that all ClickHouse gold tables exist, then truncates them before running.
+
+The final check_clickhouse_gold_quality task verifies that the ClickHouse serving layer is complete and ready for Superset reporting.
 
 Airflow is used to manage task dependencies, retries, and execution visibility.
 
@@ -486,13 +524,14 @@ This test module validates Airflow orchestration logic:
 
 - DAG imports without errors;
 - `nyc_taxi_pipeline` DAG exists;
-- ClickHouse preparation tasks exist;
+- ClickHouse preparation and quality tasks exist;
 - monthly tasks for January and December exist;
 - total task count is correct;
 - `create_clickhouse_gold_tables` runs before `truncate_clickhouse_gold_tables`;
 - the first bronze task runs after ClickHouse preparation;
 - monthly processing order is preserved;
-- gold tasks run before ClickHouse load tasks.
+- gold tasks run before ClickHouse load tasks;
+- final ClickHouse gold quality check runs after all December load tasks.
 
 Run tests locally:
 
@@ -629,7 +668,7 @@ Possible future improvements:
 
 - add Spark transformation unit tests with small sample datasets;
 - add incremental processing by month or partition;
-- add more data quality checks;
+- strengthen gold Object Storage quality checks;
 - add ClickHouse schema migration/versioning approach;
 - add dbt layer for analytical transformations;
 - improve Superset dashboard cross-filtering;
