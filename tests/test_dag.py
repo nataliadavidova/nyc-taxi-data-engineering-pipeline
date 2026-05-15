@@ -37,11 +37,12 @@ def test_nyc_taxi_dag_exists(nyc_taxi_dag):
     assert nyc_taxi_dag.dag_id == "nyc_taxi_pipeline"
 
 
-def test_dag_contains_clickhouse_preparation_tasks(nyc_taxi_dag):
+def test_dag_contains_clickhouse_tasks(nyc_taxi_dag):
     task_ids = set(nyc_taxi_dag.task_ids)
 
     assert "create_clickhouse_gold_tables" in task_ids
     assert "truncate_clickhouse_gold_tables" in task_ids
+    assert "check_clickhouse_gold_quality" in task_ids
 
 
 def test_dag_contains_january_and_december_tasks(nyc_taxi_dag):
@@ -72,9 +73,10 @@ def test_dag_contains_january_and_december_tasks(nyc_taxi_dag):
 
 
 def test_dag_has_expected_number_of_tasks(nyc_taxi_dag):
-    # 2 ClickHouse preparation tasks:
+    # 3 ClickHouse service tasks:
     # - create_clickhouse_gold_tables
     # - truncate_clickhouse_gold_tables
+    # - check_clickhouse_gold_quality
     #
     # For each of 12 months:
     # - bronze
@@ -83,8 +85,8 @@ def test_dag_has_expected_number_of_tasks(nyc_taxi_dag):
     # - 4 gold marts
     # - 4 ClickHouse load tasks
     #
-    # Total = 2 + 12 * 11 = 134
-    assert len(nyc_taxi_dag.task_ids) == 134
+    # Total = 3 + 12 * 11 = 135
+    assert len(nyc_taxi_dag.task_ids) == 135
 
 
 def test_create_tables_runs_before_truncate(nyc_taxi_dag):
@@ -140,3 +142,15 @@ def test_gold_tasks_run_before_clickhouse_loads_for_january(nyc_taxi_dag):
     assert "gold_hourly_trips_2024_01" in load_hourly.upstream_task_ids
     assert "gold_payment_type_stats_2024_01" in load_payment.upstream_task_ids
     assert "gold_location_pair_stats_2024_01" in load_location.upstream_task_ids
+
+def test_december_loads_run_before_clickhouse_gold_quality_check(nyc_taxi_dag):
+    quality_check = nyc_taxi_dag.get_task("check_clickhouse_gold_quality")
+
+    expected_upstream_tasks = {
+        "load_gold_daily_trips_to_clickhouse_2024_12",
+        "load_gold_hourly_trips_to_clickhouse_2024_12",
+        "load_gold_payment_type_stats_to_clickhouse_2024_12",
+        "load_gold_location_pair_stats_to_clickhouse_2024_12",
+    }
+
+    assert quality_check.upstream_task_ids == expected_upstream_tasks
