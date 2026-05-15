@@ -81,6 +81,7 @@ services:
       - ./jobs:/opt/airflow/jobs
       - ./logs:/opt/airflow/logs
       - ./data:/opt/airflow/data
+      - ./tests:/opt/airflow/tests
     command: >
       bash -c "
       airflow scheduler &
