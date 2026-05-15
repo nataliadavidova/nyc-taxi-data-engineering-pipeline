@@ -22,7 +22,7 @@ def dagbag():
 
 @pytest.fixture(scope="module")
 def nyc_taxi_dag(dagbag):
-    dag = dagbag.get_dag("nyc_taxi_pipeline")
+    dag = dagbag.dags.get("nyc_taxi_pipeline")
 
     assert dag is not None
 
