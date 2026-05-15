@@ -73,6 +73,14 @@ with DAG(
     tags=["nyc_taxi", "spark", "data_engineering"],
 ) as dag:
 
+    create_clickhouse_gold_tables = BashOperator(
+        task_id="create_clickhouse_gold_tables",
+        bash_command=f"""
+        cd {PROJECT_DIR} &&
+        PYTHONPATH={JOBS_DIR} python jobs/create_clickhouse_gold_tables.py
+        """,
+    )
+
     truncate_clickhouse_gold_tables = BashOperator(
         task_id="truncate_clickhouse_gold_tables",
         bash_command=f"""
@@ -80,6 +88,8 @@ with DAG(
         PYTHONPATH={JOBS_DIR} python jobs/truncate_clickhouse_gold_tables.py
         """,
     )
+
+    create_clickhouse_gold_tables >> truncate_clickhouse_gold_tables
 
     previous_month_final_tasks = [truncate_clickhouse_gold_tables]
 
