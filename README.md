@@ -88,6 +88,7 @@ nyc_taxi_final_project/
 ├── jobs/
 │   ├── config.py
 │   ├── bronze_yellow_taxi.py
+│   ├── create_clickhouse_gold_tables.py
 │   ├── silver_yellow_taxi.py
 │   ├── check_yellow_taxi_quality.py
 │   ├── gold_daily_trips.py
@@ -355,13 +356,15 @@ jobs/load_gold_location_pair_stats_to_clickhouse.py
 jobs/load_gold_payment_type_stats_to_clickhouse.py
 ```
 
-Before a full refresh, the DAG runs:
+Before a full refresh, the DAG runs two ClickHouse preparation steps:
 
 ```text
+jobs/create_clickhouse_gold_tables.py
 jobs/truncate_clickhouse_gold_tables.py
 ```
+The create_clickhouse_gold_tables.py job creates the ClickHouse database and gold tables if they do not already exist.
 
-This prevents duplicate data in ClickHouse when the full-year pipeline is rerun.
+The truncate_clickhouse_gold_tables.py job clears existing gold table data before a full reload. This prevents duplicate data in ClickHouse when the full-year pipeline is rerun.
 
 ClickHouse is used as an analytical serving layer for fast BI queries from Superset.
 
@@ -402,6 +405,9 @@ dags/nyc_taxi_pipeline.py
 The DAG processes all months of 2024 and runs the full pipeline:
 
 ```text
+create ClickHouse gold tables
+        │
+        ▼
 truncate ClickHouse gold tables
         │
         ▼
@@ -419,6 +425,7 @@ gold marts
         ▼
 load gold marts to ClickHouse
 ```
+The DAG first ensures that all ClickHouse gold tables exist, then truncates them before running.
 
 Airflow is used to manage task dependencies, retries, and execution visibility.
 
@@ -541,12 +548,12 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
-- add explicit ClickHouse table creation scripts;
 - add incremental processing by month or partition;
 - add more data quality checks;
 - add automated tests for Spark jobs;
 - add DAG import tests;
 - add CI/CD pipeline with GitHub Actions;
+- add ClickHouse schema migration/versioning approach;
 - add dbt layer for analytical transformations;
 - improve Superset dashboard cross-filtering;
 - add monitoring and alerting for pipeline failures.
