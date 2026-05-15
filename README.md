@@ -105,6 +105,9 @@ nyc_taxi_final_project/
 ├── docs/
 ├── screenshots/
 ├── superset/
+├── tests/
+│   ├── test_config.py
+│   └── test_dag.py
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .env.example
@@ -454,6 +457,54 @@ NYC Taxi BI Dashboard
 
 The dashboard includes a date filter based on `pickup_date`, so all charts can be filtered by reporting period.
 
+## Automated Tests
+
+The project includes automated tests for configuration helpers and Airflow DAG structure.
+
+Test files:
+
+```text
+tests/test_config.py
+tests/test_dag.py
+```
+### `test_config.py`
+
+This test module validates project configuration logic:
+
+- monthly date boundary calculation;
+- S3/Object Storage path helpers;
+- raw, bronze, silver, quality, bad records, and gold layer paths;
+- taxi zone lookup path.
+
+### `test_dag.py`
+
+This test module validates Airflow orchestration logic:
+
+- DAG imports without errors;
+- `nyc_taxi_pipeline` DAG exists;
+- ClickHouse preparation tasks exist;
+- monthly tasks for January and December exist;
+- total task count is correct;
+- `create_clickhouse_gold_tables` runs before `truncate_clickhouse_gold_tables`;
+- the first bronze task runs after ClickHouse preparation;
+- monthly processing order is preserved;
+- gold tasks run before ClickHouse load tasks.
+
+Run tests locally:
+
+```bash
+python -m pytest tests -v
+```
+
+Run DAG tests inside the Airflow container:
+
+```bash
+docker exec -it nyc_taxi_airflow bash -lc '
+cd /opt/airflow &&
+PYTHONPATH=/opt/airflow/jobs python -m pytest tests -v
+'
+```
+
 ## How to Run Locally
 
 ### 1. Configure Environment Variables
@@ -548,10 +599,9 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
+- add Spark transformation unit tests with small sample datasets;
 - add incremental processing by month or partition;
 - add more data quality checks;
-- add automated tests for Spark jobs;
-- add DAG import tests;
 - add CI/CD pipeline with GitHub Actions;
 - add ClickHouse schema migration/versioning approach;
 - add dbt layer for analytical transformations;
