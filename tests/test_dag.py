@@ -67,6 +67,8 @@ def test_dag_contains_january_and_december_tasks(nyc_taxi_dag):
         "load_gold_hourly_trips_to_clickhouse_2024_12",
         "load_gold_payment_type_stats_to_clickhouse_2024_12",
         "load_gold_location_pair_stats_to_clickhouse_2024_12",
+        "check_gold_schema_2024_01",
+        "check_gold_schema_2024_12",
     }
 
     assert expected_tasks.issubset(task_ids)
@@ -74,19 +76,20 @@ def test_dag_contains_january_and_december_tasks(nyc_taxi_dag):
 
 def test_dag_has_expected_number_of_tasks(nyc_taxi_dag):
     # 3 ClickHouse service tasks:
-    # - create_clickhouse_gold_tables
-    # - truncate_clickhouse_gold_tables
-    # - check_clickhouse_gold_quality
-    #
-    # For each of 12 months:
-    # - bronze
-    # - silver
-    # - quality check
-    # - 4 gold marts
-    # - 4 ClickHouse load tasks
-    #
-    # Total = 3 + 12 * 11 = 135
-    assert len(nyc_taxi_dag.task_ids) == 135
+        # - create_clickhouse_gold_tables
+        # - truncate_clickhouse_gold_tables
+        # - check_clickhouse_gold_quality
+        #
+        # For each of 12 months:
+        # - bronze
+        # - silver
+        # - silver quality check
+        # - 4 gold marts
+        # - gold Object Storage quality check
+        # - 4 ClickHouse load tasks
+        #
+        # Total = 3 + 12 * 12 = 147
+    assert len(nyc_taxi_dag.task_ids) == 147
 
 
 def test_create_tables_runs_before_truncate(nyc_taxi_dag):
@@ -132,16 +135,30 @@ def test_monthly_pipeline_dependencies_for_january(nyc_taxi_dag):
     assert "check_yellow_taxi_quality_2024_01" in gold_location.upstream_task_ids
 
 
-def test_gold_tasks_run_before_clickhouse_loads_for_january(nyc_taxi_dag):
+def test_gold_tasks_run_before_gold_schema_check_for_january(nyc_taxi_dag):
+    check_gold_schema = nyc_taxi_dag.get_task("check_gold_schema_2024_01")
+
+    expected_upstream_tasks = {
+        "gold_daily_trips_2024_01",
+        "gold_hourly_trips_2024_01",
+        "gold_payment_type_stats_2024_01",
+        "gold_location_pair_stats_2024_01",
+    }
+
+    assert check_gold_schema.upstream_task_ids == expected_upstream_tasks
+
+
+def test_gold_schema_check_runs_before_clickhouse_loads_for_january(nyc_taxi_dag):
     load_daily = nyc_taxi_dag.get_task("load_gold_daily_trips_to_clickhouse_2024_01")
     load_hourly = nyc_taxi_dag.get_task("load_gold_hourly_trips_to_clickhouse_2024_01")
     load_payment = nyc_taxi_dag.get_task("load_gold_payment_type_stats_to_clickhouse_2024_01")
     load_location = nyc_taxi_dag.get_task("load_gold_location_pair_stats_to_clickhouse_2024_01")
 
-    assert "gold_daily_trips_2024_01" in load_daily.upstream_task_ids
-    assert "gold_hourly_trips_2024_01" in load_hourly.upstream_task_ids
-    assert "gold_payment_type_stats_2024_01" in load_payment.upstream_task_ids
-    assert "gold_location_pair_stats_2024_01" in load_location.upstream_task_ids
+    assert load_daily.upstream_task_ids == {"check_gold_schema_2024_01"}
+    assert load_hourly.upstream_task_ids == {"check_gold_schema_2024_01"}
+    assert load_payment.upstream_task_ids == {"check_gold_schema_2024_01"}
+    assert load_location.upstream_task_ids == {"check_gold_schema_2024_01"}
+
 
 def test_december_loads_run_before_clickhouse_gold_quality_check(nyc_taxi_dag):
     quality_check = nyc_taxi_dag.get_task("check_clickhouse_gold_quality")
