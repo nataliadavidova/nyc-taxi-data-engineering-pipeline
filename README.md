@@ -233,11 +233,21 @@ For example, when processing January 2024, the allowed pickup date range is:
 
 Invalid records are written to the bad records layer.
 
-### Gold Object Storage Validation
+### Gold Object Storage Quality Checks
 
-The gold schema check validates that gold marts were successfully written to S3-compatible Object Storage and can be read by Spark.
+The gold Object Storage check validates that monthly gold marts were successfully written to S3-compatible Object Storage and meet expected quality rules before they are loaded into ClickHouse.
 
-This job is used as a basic validation utility for the gold parquet layer. A stronger Object Storage gold quality check can be added later to validate row counts, date ranges, and enriched fields before loading data into ClickHouse.
+It checks that:
+
+- all gold parquet marts can be read by Spark;
+- all required columns are present;
+- all gold marts are not empty;
+- `pickup_date` values belong to the expected processing month;
+- `pickup_hour` values are valid for `gold_hourly_trips`;
+- `payment_type_name` values are not empty for `gold_payment_type_stats`;
+- `pickup_zone` and `dropoff_zone` values are not empty for `gold_location_pair_stats`.
+
+This check helps catch issues in the gold parquet layer before data is loaded into the ClickHouse serving layer.
 
 ### ClickHouse Gold Quality Checks
 
@@ -464,17 +474,22 @@ silver quality checks
 gold marts
         │
         ▼
+gold Object Storage quality checks
+        │
+        ▼
 load gold marts to ClickHouse
         │
         ▼
 check ClickHouse gold quality
 ```
+Airflow is used to manage task dependencies, retries, and execution visibility.
 
 The DAG first ensures that all ClickHouse gold tables exist, then truncates them before running the full-year reload.
 
+For each month, the DAG validates gold parquet marts in Object Storage before loading them into ClickHouse.
+
 The final `check_clickhouse_gold_quality` task verifies that the ClickHouse serving layer is complete and ready for Superset reporting.
 
-Airflow is used to manage task dependencies, retries, and execution visibility.
 
 ## Superset BI Dashboard
 
@@ -534,6 +549,7 @@ This test module validates Airflow orchestration logic:
 - the first bronze task runs after ClickHouse preparation;
 - monthly processing order is preserved;
 - gold tasks run before ClickHouse load tasks;
+- gold Object Storage quality check runs after all monthly gold marts and before ClickHouse load tasks;
 - final ClickHouse gold quality check runs after all December load tasks.
 
 Run tests locally:
@@ -669,10 +685,13 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
-- strengthen gold Object Storage quality checks;
+- strengthen silver data quality checks for payment type, location IDs, and derived pickup hour;
+- add analytical gold marts for zone demand, trip type behavior, payment preferences, and ridesharing opportunities;
+- add `docs/analytics_summary.md` with answers to business questions and data-driven recommendations;
+- extend Superset dashboard with analytical charts for pickup/dropoff zones, trip types, payment trends, and ridesharing opportunities;
+- add a simple economic impact model for grouped short trips;
 - add Spark transformation unit tests with small sample datasets;
 - add incremental processing by month or partition;
 - add ClickHouse schema migration/versioning approach;
 - add dbt layer for analytical transformations;
-- improve Superset dashboard cross-filtering;
 - add monitoring and alerting for pipeline failures.

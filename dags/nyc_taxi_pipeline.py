@@ -2,7 +2,12 @@
 Airflow DAG for NYC Taxi pipeline.
 
 Pipeline:
-bronze -> silver -> quality checks -> gold marts -> ClickHouse
+bronze
+→ silver
+→ check_quality
+→ gold_daily / gold_hourly / gold_payment / gold_location
+→ check_gold_schema
+→ load_gold_daily / load_gold_hourly / load_gold_payment / load_gold_location
 """
 
 from datetime import datetime
@@ -144,6 +149,12 @@ with DAG(
             month=month,
         )
 
+        check_gold_schema = spark_task(
+            task_id="check_gold_schema",
+            job_file="check_gold_schema.py",
+            month=month,
+        )
+
         load_gold_hourly = clickhouse_load_task(
             task_id="load_gold_hourly_trips_to_clickhouse",
             job_file="load_gold_hourly_trips_to_clickhouse.py",
@@ -175,12 +186,21 @@ with DAG(
             gold_daily,
             gold_payment,
             gold_location,
-        ]
+        ] >> check_gold_schema
 
-        gold_hourly >> load_gold_hourly
-        gold_daily >> load_gold_daily
-        gold_payment >> load_gold_payment
-        gold_location >> load_gold_location
+        [
+            gold_hourly,
+            gold_daily,
+            gold_payment,
+            gold_location,
+        ] >> check_gold_schema
+
+        check_gold_schema >> [
+            load_gold_hourly,
+            load_gold_daily,
+            load_gold_payment,
+            load_gold_location,
+                ]
 
         previous_month_final_tasks = [
             load_gold_hourly,
