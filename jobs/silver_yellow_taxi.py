@@ -38,6 +38,8 @@ from config import (
     get_month_boundaries,
 )
 
+VALID_PAYMENT_TYPES = [0, 1, 2, 3, 4, 5, 6]
+
 def create_spark_session() -> SparkSession:
     validate_config()
 
@@ -101,8 +103,22 @@ def main(year: str, month: str) -> None:
         .withColumn("dq_bad_fare", col("fare_amount") < 0) \
         .withColumn("dq_bad_total", col("total_amount") < 0) \
         .withColumn("dq_bad_passenger", col("passenger_count").isNotNull() & (col("passenger_count") <= 0)) \
+        .withColumn(
+            "dq_bad_payment_type",
+            col("payment_type").isNull()
+            | (~col("payment_type").isin(VALID_PAYMENT_TYPES)),
+        ) \
+        .withColumn(
+            "dq_bad_pickup_location",
+            col("PULocationID").isNull() | (col("PULocationID") <= 0),
+        ) \
+        .withColumn(
+            "dq_bad_dropoff_location",
+            col("DOLocationID").isNull() | (col("DOLocationID") <= 0),
+        ) \
         .withColumn("dq_bad_duration", (col("trip_duration_minutes") <= 0) | (col("trip_duration_minutes") > 1440)) \
         .withColumn("dq_outlier_distance", col("trip_distance") > 100)
+
 
     dq_cols = [c for c in dq_df.columns if c.startswith("dq_")]
 
@@ -158,6 +174,18 @@ def main(year: str, month: str) -> None:
         raise ValueError(
             f"Silver contains {outside_month_count} rows outside "
             f"expected pickup date range [{month_start}, {next_month_start})"
+        )
+
+    invalid_pickup_hour_count = silver_df.filter(
+        col("pickup_hour").isNull()
+        | (col("pickup_hour") < 0)
+        | (col("pickup_hour") > 23)
+    ).count()
+
+    if invalid_pickup_hour_count > 0:
+        raise ValueError(
+            f"Silver contains {invalid_pickup_hour_count} rows "
+            "with invalid pickup_hour"
         )
 
     print(f"Clean rows: {silver_count}")
