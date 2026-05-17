@@ -2,18 +2,21 @@
 Data Quality check для NYC Taxi pipeline.
 
 Проверяет качество данных после Silver-слоя:
-1. Bronze не пустой
-2. Silver не пустой
-3. Silver не потерял слишком много строк
-4. В ключевых колонках нет NULL
-5. Нет некорректных расстояний и сумм
-6. Даты поездок соответствуют нужному месяцу
+1. Bronze не пустой.
+2. Silver не пустой.
+3. Silver не потерял слишком много строк.
+4. В ключевых колонках нет NULL.
+5. Нет некорректных расстояний.
+6. Даты поездок соответствуют нужному месяцу.
+7. payment_type заполнен и входит в ожидаемый диапазон.
+8. PULocationID и DOLocationID заполнены и положительные.
+9. pickup_hour заполнен и находится в диапазоне 0–23.
 """
 
 import argparse
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, year, month, lit
+from pyspark.sql.functions import col, lit
 
 from config import (
     AWS_ACCESS_KEY_ID,
@@ -26,6 +29,7 @@ from config import (
     get_month_boundaries,
 )
 
+VALID_PAYMENT_TYPES = [0, 1, 2, 3, 4, 5, 6]
 
 def create_spark_session() -> SparkSession:
     validate_config()
@@ -93,8 +97,11 @@ def main(year_arg: str, month_arg: str) -> None:
     required_not_null_columns = [
         "tpep_pickup_datetime",
         "tpep_dropoff_datetime",
+        "pickup_date",
+        "pickup_hour",
         "PULocationID",
         "DOLocationID",
+        "payment_type",
         "trip_distance",
         "total_amount",
     ]
@@ -107,6 +114,50 @@ def main(year_arg: str, month_arg: str) -> None:
             raise ValueError(
                 f"DQ FAILED: Column {column_name} contains NULL values"
             )
+
+    invalid_payment_type_count = silver_df.filter(
+        ~col("payment_type").isin(VALID_PAYMENT_TYPES)
+    ).count()
+
+    print(f"Invalid payment_type count: {invalid_payment_type_count}")
+
+    if invalid_payment_type_count > 0:
+        raise ValueError(
+            f"DQ FAILED: invalid payment_type found: {invalid_payment_type_count}"
+        )
+
+    invalid_pickup_location_count = silver_df.filter(
+        col("PULocationID") <= 0
+    ).count()
+
+    print(f"Invalid PULocationID count: {invalid_pickup_location_count}")
+
+    if invalid_pickup_location_count > 0:
+        raise ValueError(
+            f"DQ FAILED: invalid PULocationID found: {invalid_pickup_location_count}"
+        )
+
+    invalid_dropoff_location_count = silver_df.filter(
+        col("DOLocationID") <= 0
+    ).count()
+
+    print(f"Invalid DOLocationID count: {invalid_dropoff_location_count}")
+
+    if invalid_dropoff_location_count > 0:
+        raise ValueError(
+            f"DQ FAILED: invalid DOLocationID found: {invalid_dropoff_location_count}"
+        )
+
+    invalid_pickup_hour_count = silver_df.filter(
+        (col("pickup_hour") < 0) | (col("pickup_hour") > 23)
+    ).count()
+
+    print(f"Invalid pickup_hour count: {invalid_pickup_hour_count}")
+
+    if invalid_pickup_hour_count > 0:
+        raise ValueError(
+            f"DQ FAILED: invalid pickup_hour found: {invalid_pickup_hour_count}"
+        )
 
     invalid_distance_count = silver_df.filter(col("trip_distance") <= 0).count()
 
@@ -122,18 +173,6 @@ def main(year_arg: str, month_arg: str) -> None:
             f"DQ WARNING: total_amount <= 0 found: {invalid_amount_count}. "
             "These rows are allowed because NYC Taxi data may contain refunds, "
             "cancellations, or fare corrections."
-        )
-
-    invalid_month_count = silver_df.filter(
-        (year(col("tpep_pickup_datetime")) != int(year_arg))
-        | (month(col("tpep_pickup_datetime")) != int(month_arg))
-    ).count()
-
-    if invalid_month_count > 0:
-        print(
-            f"DQ WARNING: rows outside expected month found: {invalid_month_count}. "
-            "These rows are allowed because source files may contain late, early, "
-            "or incorrectly timestamped taxi trips."
         )
 
     print("DQ PASSED: Silver data quality checks completed successfully")

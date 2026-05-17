@@ -221,9 +221,12 @@ The silver job validates records using checks such as:
 - passenger count is valid;
 - trip duration is positive and not unrealistically long;
 - trip distance is not an extreme outlier;
-- pickup date belongs to the expected processing month.
+- pickup date belongs to the expected processing month;
+- `payment_type` is populated and belongs to the expected set of values;
+- `PULocationID` and `DOLocationID` are populated and positive;
+- derived `pickup_hour` is populated and belongs to the range from `0` to `23`.
 
-The monthly pickup date check prevents records from a wrong date range from entering the silver layer.
+These checks strengthen the silver layer contract for downstream gold marts. Payment, location, and pickup hour fields are required for payment analytics, route analytics, and hourly demand analytics.
 
 For example, when processing January 2024, the allowed pickup date range is:
 
@@ -685,7 +688,6 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
-- strengthen silver data quality checks for payment type, location IDs, and derived pickup hour;
 - add analytical gold marts for zone demand, trip type behavior, payment preferences, and ridesharing opportunities;
 - add `docs/analytics_summary.md` with answers to business questions and data-driven recommendations;
 - extend Superset dashboard with analytical charts for pickup/dropoff zones, trip types, payment trends, and ridesharing opportunities;
