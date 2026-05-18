@@ -110,6 +110,9 @@ nyc_taxi_final_project/
 │   └── test_dag.py
 ├── data/
 ├── docs/
+│   └── analytics_summary.md
+├── sql/
+│   └── analytics_questions.sql
 ├── screenshots/
 ├── superset/
 ├── Dockerfile
@@ -246,6 +249,7 @@ It checks that:
 - all required columns are present;
 - all gold marts are not empty;
 - `pickup_date` values belong to the expected processing month;
+- `trip_type` values are populated for hourly, route, and payment marts;
 - `pickup_hour` values are valid for `gold_hourly_trips`;
 - `payment_type_name` values are not empty for `gold_payment_type_stats`;
 - `pickup_zone` and `dropoff_zone` values are not empty for `gold_location_pair_stats`.
@@ -261,6 +265,7 @@ It checks that:
 - all ClickHouse gold tables exist;
 - all ClickHouse gold tables are not empty;
 - `pickup_date` covers the expected full-year range from `2024-01-01` to `2024-12-31`;
+- `trip_type` values are populated for hourly, route, and payment tables;
 - `gold_location_pair_stats` has non-empty pickup and dropoff zone names;
 - `gold_payment_type_stats` has non-empty payment type names.
 
@@ -302,6 +307,7 @@ Hourly demand analytics.
 Main fields:
 
 - `pickup_date`
+- `trip_type`
 - `pickup_hour`
 - `trips_count`
 - `total_revenue`
@@ -314,6 +320,7 @@ Main use cases:
 - trips by hour of day;
 - demand distribution throughout the day;
 - peak hour analysis;
+- peak hour analysis by trip type;
 - hourly revenue analysis.
 
 ### `gold_location_pair_stats`
@@ -323,6 +330,7 @@ Pickup and dropoff location pair statistics.
 Main fields:
 
 - `pickup_date`
+- `trip_type`
 - `pickup_location_id`
 - `pickup_zone`
 - `pickup_borough`
@@ -342,7 +350,9 @@ Main use cases:
 - top routes by number of trips;
 - top routes by revenue;
 - route-level demand analysis;
-- pickup/dropoff zone analysis.
+- route-level demand analysis by trip type;
+- pickup/dropoff zone analysis;
+- ridesharing opportunity analysis for short nearby trips.
 
 ### `gold_payment_type_stats`
 
@@ -351,6 +361,7 @@ Payment type analytics.
 Main fields:
 
 - `pickup_date`
+- `trip_type`
 - `payment_type`
 - `payment_type_name`
 - `trips_count`
@@ -365,7 +376,11 @@ Main use cases:
 - trips by payment type;
 - revenue by payment type;
 - average check by payment type;
-- tips analysis.
+- tips analysis;
+- payment behavior analysis by trip type;
+- payment preference trends over time.
+
+The `trip_type` dimension (`short`, `medium`, `long`) is included in hourly, route, and payment marts to support analytical questions about trip behavior, peak demand by trip type, payment preferences, and ridesharing opportunities.
 
 ## ClickHouse Serving Layer
 
@@ -415,6 +430,7 @@ This job validates that the ClickHouse serving layer is ready for BI usage:
 - all gold tables exist;
 - all gold tables are not empty;
 - `pickup_date` covers the expected full-year range from `2024-01-01` to `2024-12-31`;
+- `trip_type` values are populated in hourly, route, and payment tables;
 - enriched pickup and dropoff location names are populated;
 - payment type names are populated.
 
@@ -430,13 +446,21 @@ After processing the full year 2024, the ClickHouse gold tables contain the foll
 2024-01-01 → 2024-12-31
 ```
 
-Final row counts:
+Final row counts after the full-year pipeline run with the `trip_type` dimension:
 
 ```text
 gold_daily_trips              366
-gold_hourly_trips             8783
-gold_payment_type_stats       1830
-gold_location_pair_stats      2857013
+gold_hourly_trips             26349
+gold_payment_type_stats       5490
+gold_location_pair_stats      3460697
+```
+
+The hourly, payment, and route marts include the `trip_type` dimension:
+
+```text
+short
+medium
+long
 ```
 
 The `gold_location_pair_stats` mart is enriched with readable taxi zone names, for example:
@@ -511,6 +535,8 @@ The dashboard is built on top of ClickHouse gold marts and includes:
 - top routes by trips;
 - top routes by revenue.
 
+Additional charts based on the `trip_type` dimension can be added to analyze peak hours by trip type, payment behavior by trip type, and short-trip ridesharing opportunities.
+
 Dashboard name:
 
 ```text
@@ -518,6 +544,36 @@ NYC Taxi BI Dashboard
 ```
 
 The dashboard includes a date filter based on `pickup_date`, so all charts can be filtered by reporting period.
+
+## Analytical Questions and Business Recommendations
+
+The project includes a dedicated analytical layer for answering business questions from the original project requirements.
+
+Analytical SQL queries are stored in:
+
+```text
+sql/analytics_questions.sql
+```
+
+The analytical summary document is stored in:
+
+```text
+docs/analytics_summary.md
+```
+
+The analysis covers:
+
+- zones with the highest pickup and dropoff demand;
+- peak taxi demand hours;
+- trip distribution by `trip_type`;
+- peak hours for short, medium, and long trips;
+- top pickup and dropoff zones by trip type;
+- payment methods by trip type;
+- payment preference evolution over time;
+- ridesharing opportunities for short nearby trips;
+- a simplified economic impact model for grouped short trips.
+
+The analytical summary also includes business recommendations related to zone-based pricing, peak-hour pricing, short-trip promotions, card payment reliability, and grouped rides.
 
 ## Automated Tests and CI
 
@@ -593,6 +649,24 @@ PYTHONPATH=jobs python -m pytest tests -v
 ```
 
 This helps ensure that changes do not break configuration helpers, Airflow DAG imports, or task dependencies before they are merged into `main`.
+
+## Spark Job Optimization
+
+The Silver Spark job was optimized to reduce repeated Spark actions and improve pipeline stability.
+
+Previously, the Silver job calculated data quality metrics by running a separate `count()` action for each DQ flag. This caused multiple repeated passes over the same monthly dataset and increased the amount of repeated reads from Object Storage.
+
+The optimized version calculates DQ metrics in a single aggregation step.
+
+Main improvements:
+
+- DQ metrics are calculated with one aggregate operation instead of multiple separate `count()` actions;
+- repeated Spark actions were reduced;
+- repeated reads from Object Storage were reduced;
+- `dq_df` is persisted with `StorageLevel.DISK_ONLY` to reduce recomputation without increasing Java heap pressure;
+- `silver_df` is not cached in memory to avoid Java heap out-of-memory errors.
+
+As a result, monthly Silver jobs became more stable and, during local testing, completed approximately 2 minutes faster on average.
 
 ## How to Run Locally
 
@@ -688,12 +762,12 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
-- add analytical gold marts for zone demand, trip type behavior, payment preferences, and ridesharing opportunities;
-- add `docs/analytics_summary.md` with answers to business questions and data-driven recommendations;
+- complete analytical summary with final query results and business conclusions;
 - extend Superset dashboard with analytical charts for pickup/dropoff zones, trip types, payment trends, and ridesharing opportunities;
-- add a simple economic impact model for grouped short trips;
+- add Airflow/Spark task duration monitoring and alerts for long-running monthly jobs;
+- review and further optimize Spark jobs to reduce repeated actions, repeated Object Storage reads, and long-running monthly tasks;
 - add Spark transformation unit tests with small sample datasets;
 - add incremental processing by month or partition;
 - add ClickHouse schema migration/versioning approach;
 - add dbt layer for analytical transformations;
-- add monitoring and alerting for pipeline failures.
+- add pipeline-level monitoring and alerting for failures, retries, and SLA misses.

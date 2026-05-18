@@ -64,7 +64,7 @@ def main(year: str, month: str) -> None:
 
     gold_df = (
         enriched_df
-        .groupBy("pickup_date", "payment_type", "payment_type_name")
+        .groupBy("pickup_date", "trip_type", "payment_type", "payment_type_name")
         .agg(
             count("*").alias("trips_count"),
             round(sum("total_amount"), 2).alias("total_revenue"),
@@ -79,7 +79,7 @@ def main(year: str, month: str) -> None:
         .withColumn("year", col("pickup_date").substr(1, 4))
         .withColumn("month", col("pickup_date").substr(6, 2))
         .withColumn("gold_load_timestamp", current_timestamp())
-        .orderBy("pickup_date", col("trips_count").desc())
+        .orderBy("pickup_date", "trip_type", col("trips_count").desc())
     )
 
     print("Gold payment type preview:")
