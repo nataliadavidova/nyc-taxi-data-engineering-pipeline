@@ -57,6 +57,7 @@ def create_gold_hourly_trips_table() -> None:
     (
         pickup_date Date,
         pickup_hour UInt8,
+        trip_type String,
         trips_count UInt32,
         total_revenue Float64,
         avg_check Float64,
@@ -68,7 +69,7 @@ def create_gold_hourly_trips_table() -> None:
     )
     ENGINE = MergeTree()
     PARTITION BY toYYYYMM(pickup_date)
-    ORDER BY (pickup_date, pickup_hour)
+    ORDER BY (pickup_date, pickup_hour, trip_type)
     SETTINGS index_granularity = 8192
     """
 
@@ -81,6 +82,7 @@ def create_gold_payment_type_stats_table() -> None:
     CREATE TABLE IF NOT EXISTS {CLICKHOUSE_DATABASE}.gold_payment_type_stats
     (
         pickup_date Date,
+        trip_type String,
         payment_type Int64,
         payment_type_name String,
         trips_count Int64,
@@ -95,7 +97,7 @@ def create_gold_payment_type_stats_table() -> None:
     )
     ENGINE = MergeTree()
     PARTITION BY toYYYYMM(pickup_date)
-    ORDER BY (pickup_date, payment_type)
+    ORDER BY (pickup_date, trip_type, payment_type)
     SETTINGS index_granularity = 8192
     """
 
@@ -108,6 +110,7 @@ def create_gold_location_pair_stats_table() -> None:
     CREATE TABLE IF NOT EXISTS {CLICKHOUSE_DATABASE}.gold_location_pair_stats
     (
         pickup_date Date,
+        trip_type String,
         pickup_location_id Int32,
         pickup_borough Nullable(String),
         pickup_zone Nullable(String),
@@ -127,7 +130,7 @@ def create_gold_location_pair_stats_table() -> None:
     )
     ENGINE = MergeTree()
     PARTITION BY toYYYYMM(pickup_date)
-    ORDER BY (pickup_date, pickup_location_id, dropoff_location_id)
+    ORDER BY (pickup_date, trip_type, pickup_location_id, dropoff_location_id)
     SETTINGS index_granularity = 8192
     """
 

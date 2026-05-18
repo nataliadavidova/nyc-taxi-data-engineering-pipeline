@@ -60,7 +60,7 @@ def main(year: str, month: str) -> None:
 
     gold_df = (
         silver_df
-        .groupBy("pickup_date", "pickup_hour")
+        .groupBy("pickup_date", "pickup_hour", "trip_type")
         .agg(
             count("*").alias("trips_count"),
             round(sum("total_amount"), 2).alias("total_revenue"),
@@ -71,7 +71,7 @@ def main(year: str, month: str) -> None:
         .withColumn("year", col("pickup_date").substr(1, 4))
         .withColumn("month", col("pickup_date").substr(6, 2))
         .withColumn("gold_load_timestamp", current_timestamp())
-        .orderBy("pickup_date", "pickup_hour")
+        .orderBy("pickup_date", "pickup_hour", "trip_type")
     )
 
     print("Gold preview:")

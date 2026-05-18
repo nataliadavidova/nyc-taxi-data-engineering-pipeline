@@ -194,6 +194,25 @@ def assert_payment_type_names_not_empty() -> None:
         f"empty_payment_type_name_count={empty_payment_type_name_count}"
     )
 
+def assert_trip_type_not_empty(table_name: str) -> None:
+    query = f"""
+    SELECT countIf(trip_type IS NULL OR trip_type = '')
+    FROM {CLICKHOUSE_DATABASE}.{table_name}
+    FORMAT TSV
+    """
+
+    empty_trip_type_count = int(fetch_single_value(query))
+
+    if empty_trip_type_count > 0:
+        raise AssertionError(
+            f"Found empty trip_type values in {table_name}: "
+            f"empty_trip_type_count={empty_trip_type_count}"
+        )
+
+    print(
+        f"trip_type values are valid for {table_name}: "
+        f"empty_trip_type_count={empty_trip_type_count}"
+    )
 
 def main() -> None:
     print("Starting ClickHouse gold quality checks")
@@ -209,6 +228,13 @@ def main() -> None:
         assert_table_exists(table_name)
         assert_table_not_empty(table_name)
         assert_pickup_date_range(table_name)
+
+        if table_name in [
+            "gold_hourly_trips",
+            "gold_payment_type_stats",
+            "gold_location_pair_stats",
+        ]:
+            assert_trip_type_not_empty(table_name)
 
     print()
     print("=" * 80)

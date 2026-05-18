@@ -16,14 +16,18 @@ from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
     col,
     concat_ws,
+    count as spark_count,
     current_timestamp,
     date_format,
     hour,
     lit,
+    sum as spark_sum,
     to_date,
     unix_timestamp,
     when,
 )
+
+from pyspark.storagelevel import StorageLevel
 
 from config import (
     AWS_ACCESS_KEY_ID,
@@ -122,6 +126,8 @@ def main(year: str, month: str) -> None:
 
     dq_cols = [c for c in dq_df.columns if c.startswith("dq_")]
 
+    dq_df = dq_df.persist(StorageLevel.DISK_ONLY)
+
     # ======================
     # BAD RECORDS
     # ======================
@@ -130,17 +136,31 @@ def main(year: str, month: str) -> None:
     for c in dq_cols:
         bad_condition = col(c) if bad_condition is None else (bad_condition | col(c))
 
+    report_agg_expressions = [
+        spark_sum(when(col(c), 1).otherwise(0)).cast("long").alias(c)
+        for c in dq_cols
+    ]
+
+    report_agg_expressions.append(
+        spark_sum(when(bad_condition, 1).otherwise(0))
+        .cast("long")
+        .alias("total_bad")
+    )
+
+    report_counts = dq_df.agg(*report_agg_expressions).collect()[0]
+
+    bad_count = int(report_counts["total_bad"])
+    print(f"Bad rows: {bad_count}")
+
     bad_df = dq_df.filter(bad_condition)
 
     bad_df = bad_df.withColumn(
         "dq_reason",
-        concat_ws("; ",
-            *[when(col(c), lit(c)) for c in dq_cols]
-        )
+        concat_ws(
+            "; ",
+            *[when(col(c), lit(c)) for c in dq_cols],
+        ),
     )
-
-    bad_count = bad_df.count()
-    print(f"Bad rows: {bad_count}")
 
     bad_df.write.mode("overwrite").parquet(bad_records_path)
 
@@ -150,37 +170,51 @@ def main(year: str, month: str) -> None:
 
     clean_df = dq_df.filter(~bad_condition)
 
-    silver_df = clean_df \
-        .withColumn("pickup_date", to_date("tpep_pickup_datetime")) \
-        .withColumn("pickup_hour", hour("tpep_pickup_datetime")) \
-        .withColumn("pickup_month", date_format("tpep_pickup_datetime", "yyyy-MM")) \
+    silver_df = (
+        clean_df
+        .withColumn("pickup_date", to_date("tpep_pickup_datetime"))
+        .withColumn("pickup_hour", hour("tpep_pickup_datetime"))
+        .withColumn("pickup_month", date_format("tpep_pickup_datetime", "yyyy-MM"))
         .withColumn(
             "trip_type",
             when(col("trip_distance") < 2, "short")
             .when(col("trip_distance") <= 10, "medium")
-            .otherwise("long")
-        ) \
-        .withColumn("silver_load_timestamp", current_timestamp()) \
+            .otherwise("long"),
+        )
+        .withColumn("silver_load_timestamp", current_timestamp())
         .drop(*dq_cols)
+    )
 
-    silver_count = silver_df.count()
+    silver_quality_counts = silver_df.agg(
+        spark_count("*").cast("long").alias("silver_count"),
+        spark_sum(
+            when(
+                (col("pickup_date") < lit(month_start).cast("date"))
+                | (col("pickup_date") >= lit(next_month_start).cast("date")),
+                1,
+            ).otherwise(0)
+        ).cast("long").alias("outside_month_count"),
+        spark_sum(
+            when(
+                col("pickup_hour").isNull()
+                | (col("pickup_hour") < 0)
+                | (col("pickup_hour") > 23),
+                1,
+            ).otherwise(0)
+        ).cast("long").alias("invalid_pickup_hour_count"),
+    ).collect()[0]
 
-    outside_month_count = silver_df.filter(
-        (col("pickup_date") < lit(month_start).cast("date"))
-        | (col("pickup_date") >= lit(next_month_start).cast("date"))
-    ).count()
+    silver_count = int(silver_quality_counts["silver_count"])
+    outside_month_count = int(silver_quality_counts["outside_month_count"])
+    invalid_pickup_hour_count = int(
+        silver_quality_counts["invalid_pickup_hour_count"]
+    )
 
     if outside_month_count > 0:
         raise ValueError(
             f"Silver contains {outside_month_count} rows outside "
             f"expected pickup date range [{month_start}, {next_month_start})"
         )
-
-    invalid_pickup_hour_count = silver_df.filter(
-        col("pickup_hour").isNull()
-        | (col("pickup_hour") < 0)
-        | (col("pickup_hour") > 23)
-    ).count()
 
     if invalid_pickup_hour_count > 0:
         raise ValueError(
@@ -200,19 +234,26 @@ def main(year: str, month: str) -> None:
     report_data = []
 
     for c in dq_cols:
-        failed = dq_df.filter(col(c)).count()
-        report_data.append((c, failed, total_count, failed / total_count))
+        failed = int(report_counts[c])
+        share = failed / total_count if total_count else 0.0
+        report_data.append((c, failed, total_count, share))
 
-    report_data.append(("total_bad", bad_count, total_count, bad_count / total_count))
+    total_bad_share = bad_count / total_count if total_count else 0.0
+    report_data.append(("total_bad", bad_count, total_count, total_bad_share))
 
-    report_df = spark.createDataFrame(
-        report_data,
-        ["check", "failed_rows", "total_rows", "share"]
-    ).withColumn("created_at", current_timestamp())
+    report_df = (
+        spark.createDataFrame(
+            report_data,
+            ["check", "failed_rows", "total_rows", "share"],
+        )
+        .withColumn("created_at", current_timestamp())
+    )
 
     report_df.show(truncate=False)
 
     report_df.write.mode("overwrite").parquet(quality_path)
+
+    dq_df.unpersist()
 
     print("Silver job DONE ✅")
 

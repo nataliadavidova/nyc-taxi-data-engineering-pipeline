@@ -53,6 +53,7 @@ def main(year_arg: str, month_arg: str) -> None:
     df = df.select(
         col("pickup_date"),
         col("pickup_hour"),
+        col("trip_type"),
         col("trips_count"),
         col("total_revenue"),
         col("avg_check"),

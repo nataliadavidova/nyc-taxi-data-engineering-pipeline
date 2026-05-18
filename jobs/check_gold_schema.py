@@ -54,6 +54,7 @@ EXPECTED_COLUMNS: Dict[str, List[str]] = {
     "gold_hourly_trips": [
         "pickup_date",
         "pickup_hour",
+        "trip_type",
         "trips_count",
         "total_revenue",
         "avg_check",
@@ -65,6 +66,7 @@ EXPECTED_COLUMNS: Dict[str, List[str]] = {
     ],
     "gold_location_pair_stats": [
         "pickup_date",
+        "trip_type",
         "pickup_location_id",
         "pickup_borough",
         "pickup_zone",
@@ -84,6 +86,7 @@ EXPECTED_COLUMNS: Dict[str, List[str]] = {
     ],
     "gold_payment_type_stats": [
         "pickup_date",
+        "trip_type",
         "payment_type",
         "payment_type_name",
         "trips_count",
@@ -235,6 +238,17 @@ def check_gold_table(
         month_start=month_start,
         next_month_start=next_month_start,
     )
+
+    if table_name in [
+        "gold_hourly_trips",
+        "gold_location_pair_stats",
+        "gold_payment_type_stats",
+    ]:
+        assert_string_columns_not_empty(
+            df=df,
+            table_name=table_name,
+            column_names=["trip_type"],
+        )
 
     if table_name == "gold_hourly_trips":
         assert_pickup_hour_is_valid(df, table_name)
