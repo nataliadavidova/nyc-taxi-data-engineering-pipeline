@@ -104,16 +104,39 @@ nyc_taxi_final_project/
 │   ├── load_gold_daily_trips_to_clickhouse.py
 │   ├── load_gold_hourly_trips_to_clickhouse.py
 │   ├── load_gold_location_pair_stats_to_clickhouse.py
-│   └── load_gold_payment_type_stats_to_clickhouse.py
+│   ├── load_gold_payment_type_stats_to_clickhouse.py
+│   ├── load_taxi_zone_centroids_to_clickhouse.py
+│   └── run_clickhouse_sql_file.py
 ├── tests/
 │   ├── test_config.py
 │   └── test_dag.py
 ├── data/
+│   └── geo/
+│       └── taxi_zone_centroids.csv
 ├── docs/
-│   └── analytics_summary.md
+│   ├── analytics_summary.md
+│   └── nyc_taxi_bi_dashboard.pdf
 ├── sql/
-│   └── analytics_questions.sql
+│   └── analytics/
+│       ├── 01_top_pickup_zones.sql
+│       ├── 02_top_dropoff_zones.sql
+│       ├── 03_peak_hours.sql
+│       ├── 04_trip_type_distribution.sql
+│       ├── 05_peak_hours_by_trip_type.sql
+│       ├── 06_top_zones_by_trip_type.sql
+│       ├── 07_payment_methods_by_trip_type.sql
+│       ├── 08_payment_preference_trends.sql
+│       └── 09_short_trip_ridesharing_opportunities.sql
 ├── screenshots/
+│   ├── airflow_successful_run_graph.png
+│   ├── clickhouse_gold_tables.png
+│   ├── superset_01_executive_overview.png
+│   ├── superset_02_trip_type_and_peak_demand.png
+│   ├── superset_03_heatmap_and_geo_maps.png
+│   ├── superset_04_geo_demand_zones.png
+│   ├── superset_05_routes_and_payment_trends.png
+│   ├── superset_06_payment_analytics.png
+│   └── superset_07_ridesharing_opportunities.png
 ├── superset/
 ├── Dockerfile
 ├── docker-compose.yml
@@ -520,30 +543,142 @@ The final `check_clickhouse_gold_quality` task verifies that the ClickHouse serv
 
 ## Superset BI Dashboard
 
-Apache Superset is used as the BI layer.
+Apache Superset is used as the BI and analytical visualization layer.
 
-The dashboard is built on top of ClickHouse gold marts and includes:
+The dashboard is built on top of ClickHouse gold marts and Superset virtual datasets. It provides an executive-level overview of NYC Yellow Taxi performance, demand patterns, payment behavior, geospatial demand concentration, and grouped ride opportunities.
+
+Dashboard name: `NYC Taxi BI Dashboard`.
+
+The exported dashboard PDF is available here: [`docs/nyc_taxi_bi_dashboard.pdf`](docs/nyc_taxi_bi_dashboard.pdf).
+
+This PDF provides a static portfolio-friendly version of the final Superset dashboard.
+
+The dashboard includes the following analytical sections.
+
+### Executive Overview
+
+KPI cards summarize full-year 2024 performance:
 
 - total trips;
 - total revenue;
 - average check;
-- daily trips trend;
-- daily revenue trend;
-- trips by hour;
-- trips by payment type;
-- average check by payment type;
+- average cost per mile;
+- average trip distance;
+- average trip duration.
+
+### Daily Performance
+
+Daily trend charts show:
+
+- daily trips;
+- daily revenue.
+
+These charts help identify seasonality, weekly demand patterns, demand drops, and revenue fluctuations.
+
+### Trip Type Analytics
+
+Trip type analytics are based on the `trip_type` dimension:
+
+- `short`;
+- `medium`;
+- `long`.
+
+The dashboard includes:
+
+- trip distribution by type;
+- revenue by trip type;
+- average cost per mile by trip type.
+
+This section helps compare trip volume, revenue contribution, and passenger cost efficiency across different distance-based trip segments.
+
+### Peak Demand
+
+Peak demand charts show:
+
+- trips by pickup hour;
+- peak hours by trip type.
+
+The heatmap highlights how short, medium, and long trips have different demand patterns throughout the day.
+
+### Demand Geography
+
+Geography-focused charts show:
+
+- top pickup zones by trips;
+- top dropoff zones by trips;
 - top routes by trips;
 - top routes by revenue.
 
-Additional charts based on the `trip_type` dimension can be added to analyze peak hours by trip type, payment behavior by trip type, and short-trip ridesharing opportunities.
+These charts help identify high-demand zones, high-value routes, airport-driven demand, and dense Manhattan pickup/dropoff patterns.
 
-Dashboard name:
+### Geospatial Demand
+
+The dashboard includes map-based visualizations:
+
+- pickup demand map;
+- dropoff demand map.
+
+These maps use taxi zone centroid coordinates joined with aggregated pickup and dropoff demand. They help visually identify where taxi demand is geographically concentrated.
+
+### Payment Analytics
+
+Payment analytics include:
+
+- payment preference trend over time;
+- payment methods by trip type;
+- average check by payment type.
+
+These charts show that card payments dominate across trip types and help monitor changes in payment behavior over time.
+
+### Ridesharing Opportunities
+
+The dashboard includes a dedicated analytical section for grouped ride opportunities:
+
+- top short-trip ridesharing candidate routes;
+- vehicle revenue uplift for top short-trip candidates.
+
+This section focuses on high-volume short trips between nearby zones and evaluates grouped ride potential using a simplified business model.
+
+The dashboard includes a date filter based on `pickup_date`, so charts can be filtered by reporting period.
+
+## Geospatial Enrichment
+
+To support map visualizations in Superset, the project includes a taxi zone centroid enrichment step.
+
+The original gold marts contain taxi zone identifiers and readable zone names, but they do not contain geographical coordinates.
+
+To enable pickup and dropoff demand maps, taxi zone geometry was processed into a centroid lookup table:
 
 ```text
-NYC Taxi BI Dashboard
+data/geo/taxi_zone_centroids.csv
 ```
 
-The dashboard includes a date filter based on `pickup_date`, so all charts can be filtered by reporting period.
+This file contains:
+
+- `location_id`;
+- `borough`;
+- `zone`;
+- `longitude`;
+- `latitude`.
+
+The lookup table is loaded into ClickHouse using:
+
+```text
+jobs/load_taxi_zone_centroids_to_clickhouse.py
+```
+
+Target ClickHouse table:
+
+```text
+nyc_taxi.taxi_zone_centroids
+```
+
+Some taxi zones are represented by multiple geometry parts. For example:
+
+- `56` — Corona;
+- `103` — Governor's Island / Ellis Island / Liberty Island.
+
+To prevent metric duplication during joins, Superset virtual datasets deduplicate centroids to one row per `location_id` before joining them with pickup and dropoff demand.
 
 ## Analytical Questions and Business Recommendations
 
@@ -746,6 +881,34 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 ## Screenshots
 
+### Superset Dashboard — Executive Overview
+
+![Superset Executive Overview](screenshots/superset_01_executive_overview.png)
+
+### Superset Dashboard — Trip Type and Peak Demand
+
+![Superset Trip Type and Peak Demand](screenshots/superset_02_trip_type_and_peak_demand.png)
+
+### Superset Dashboard — Heatmap and Geospatial Maps
+
+![Superset Heatmap and Geospatial Maps](screenshots/superset_03_heatmap_and_geo_maps.png)
+
+### Superset Dashboard — Geospatial Demand and Top Zones
+
+![Superset Geospatial Demand and Top Zones](screenshots/superset_04_geo_demand_zones.png)
+
+### Superset Dashboard — Routes and Payment Trends
+
+![Superset Routes and Payment Trends](screenshots/superset_05_routes_and_payment_trends.png)
+
+### Superset Dashboard — Payment Analytics
+
+![Superset Payment Analytics](screenshots/superset_06_payment_analytics.png)
+
+### Superset Dashboard — Ridesharing Opportunities
+
+![Superset Ridesharing Opportunities](screenshots/superset_07_ridesharing_opportunities.png)
+
 ### Airflow Successful Pipeline Run
 
 ![Airflow Successful Pipeline Run](screenshots/airflow_successful_run_graph.png)
@@ -754,20 +917,15 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 ![ClickHouse Gold Tables](screenshots/clickhouse_gold_tables.png)
 
-### Superset BI Dashboard
-
-![Superset BI Dashboard](screenshots/superset_dashboard.png)
-
 ## Future Improvements
 
 Possible future improvements:
 
-- complete analytical summary with final query results and business conclusions;
-- extend Superset dashboard with analytical charts for pickup/dropoff zones, trip types, payment trends, and ridesharing opportunities;
-- add Airflow/Spark task duration monitoring and alerts for long-running monthly jobs;
+- export and version Superset dashboard configuration;
+- add taxi zone polygon-based choropleth maps instead of centroid-based point maps;
+- add pipeline monitoring and alerting for failures, long-running Airflow tasks, and Spark job duration anomalies;
 - review and further optimize Spark jobs to reduce repeated actions, repeated Object Storage reads, and long-running monthly tasks;
 - add Spark transformation unit tests with small sample datasets;
 - add incremental processing by month or partition;
 - add ClickHouse schema migration/versioning approach;
-- add dbt layer for analytical transformations;
-- add pipeline-level monitoring and alerting for failures, retries, and SLA misses.
+- add dbt layer for analytical transformations.
