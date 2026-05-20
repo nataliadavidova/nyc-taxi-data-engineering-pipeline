@@ -211,7 +211,20 @@ The silver layer is partitioned by year and month.
 
 ### Gold Layer
 
-The gold layer contains business-ready analytical marts.
+The project follows a medallion-style data lake architecture:
+
+```text
+raw → bronze → silver → gold
+```
+
+The gold layer follows a Kimball-style analytical mart approach. Each gold table is designed around a clear analytical grain and business process:
+
+- `gold_daily_trips` — daily taxi performance metrics;
+- `gold_hourly_trips` — hourly demand and trip type analysis;
+- `gold_location_pair_stats` — pickup/dropoff zone and route-level analytics;
+- `gold_payment_type_stats` — payment behavior analytics.
+
+This structure makes the final marts suitable for business reporting, ClickHouse analytics, and Superset dashboard visualizations.
 
 Gold jobs:
 
@@ -552,6 +565,19 @@ Dashboard name: `NYC Taxi BI Dashboard`.
 The exported dashboard PDF is available here: [`docs/nyc_taxi_bi_dashboard.pdf`](docs/nyc_taxi_bi_dashboard.pdf).
 
 This PDF provides a static portfolio-friendly version of the final Superset dashboard.
+
+### Superset Virtual Datasets
+
+Some dashboard charts are based directly on ClickHouse gold marts, while others use Superset virtual datasets.
+
+Virtual datasets are used to prepare chart-specific analytical views without creating additional physical tables in ClickHouse. They include:
+
+- pickup and dropoff zone map datasets with taxi zone centroid coordinates;
+- payment preference trend dataset;
+- grouped ride opportunity dataset;
+- route-level and trip-type analytical views.
+
+For geospatial charts, virtual datasets deduplicate taxi zone centroids to one row per `location_id` before joining them with pickup and dropoff demand. This prevents duplicated metrics for multi-part taxi zones.
 
 The dashboard includes the following analytical sections.
 
