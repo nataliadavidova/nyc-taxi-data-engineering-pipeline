@@ -22,6 +22,19 @@ This project demonstrates core data engineering practices:
 - centralized configuration and reusable path helpers;
 - full-year historical data processing.
 
+## Project Highlights
+
+- Built an end-to-end batch data engineering pipeline for full-year 2024 NYC Yellow Taxi data.
+- Implemented a medallion architecture with raw, bronze, silver, and gold data layers.
+- Developed PySpark ETL jobs for ingestion, cleaning, validation, feature derivation, and analytical mart creation.
+- Orchestrated the full pipeline with Apache Airflow, including monthly processing, dependency management, retries, and final quality gates.
+- Loaded business-ready gold marts into ClickHouse as an analytical serving layer for fast BI queries.
+- Built a Superset BI dashboard for executive reporting, demand analysis, payment behavior, geospatial demand patterns, and ridesharing opportunity analysis.
+- Added data quality checks for Silver, Gold Object Storage, and ClickHouse layers to prevent invalid data from reaching BI reports.
+- Added geospatial enrichment using taxi zone centroid coordinates for pickup and dropoff demand maps.
+- Added automated tests and GitHub Actions CI to validate configuration helpers, DAG imports, and Airflow task dependencies.
+- Optimized the Silver Spark job by reducing repeated Spark actions and Object Storage reads, improving local monthly job runtime by approximately 2 minutes on average.
+
 ## Business Value
 
 The resulting BI dashboard helps analyze NYC Yellow Taxi operations across the full year 2024.
