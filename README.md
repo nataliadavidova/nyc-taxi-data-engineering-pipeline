@@ -713,7 +713,7 @@ The project includes a dedicated analytical layer for answering business questio
 Analytical SQL queries are stored in:
 
 ```text
-sql/analytics_questions.sql
+sql/analytics/
 ```
 
 The analytical summary document is stored in:
