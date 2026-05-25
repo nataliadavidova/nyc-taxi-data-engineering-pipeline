@@ -851,6 +851,16 @@ During local benchmarking, the strongest runtime improvements were observed in q
 
 During a full-year local Airflow DAG run, total pipeline runtime decreased from approximately 2 hours 2 minutes before the optimization pass to approximately 1 hour 39 minutes after the optimization pass. This reduced the full DAG runtime by about 23 minutes, or approximately 18.9%.
 
+## Monitoring and Alerting
+
+The production-like monitoring and alerting strategy is documented in:
+
+```text
+docs/monitoring_plan.md
+```
+
+The plan includes Airflow DAG monitoring, Spark task runtime SLA thresholds, Silver and Gold data quality checks, ClickHouse serving-layer validation, Superset dashboard monitoring, and incident response guidelines.
+
 ## How to Run Locally
 
 ### 1. Configure Environment Variables
