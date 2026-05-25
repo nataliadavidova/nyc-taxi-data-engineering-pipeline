@@ -1,50 +1,54 @@
 """
 Silver job for NYC Yellow Taxi data.
 
-Что делает:
-1. Читает bronze-слой из Yandex Object Storage.
-2. Добавляет технические и аналитические поля для проверки качества.
-3. Выполняет data quality checks.
-4. Сохраняет bad records отдельно.
-5. Формирует clean/silver dataset.
-6. Проверяет качество silver-слоя перед записью.
-7. Пишет silver-слой.
-8. Пишет quality report.
+What this job does:
+1. Reads the Bronze layer from Yandex Object Storage.
+2. Adds technical and analytical fields required for data quality checks.
+3. Performs row-level data quality checks.
+4. Writes bad records separately.
+5. Builds the clean Silver dataset.
+6. Validates the Silver dataset before writing it.
+7. Writes the Silver layer.
+8. Writes the quality report.
 
-Оптимизационные решения:
-1. Не делаем отдельный df.count() в начале job.
-   Почему:
-   - df.count() — это отдельный Spark action.
-   - Он заставляет Spark полностью прочитать monthly bronze parquet.
-   - Потом следующий aggregate снова проходит по тем же данным.
-   Вместо этого total_count считается внутри общего DQ aggregate.
+Optimization decisions:
+1. Do not run a separate df.count() at the beginning of the job.
+   Why:
+   - df.count() is a separate Spark action;
+   - it forces Spark to scan the monthly Bronze parquet dataset;
+   - the following DQ aggregate would scan the same data again.
+   Instead, total_count is calculated inside the shared DQ aggregate.
 
-2. DQ-метрики считаются одним aggregate.
-   Почему:
-   - раньше отдельные count() по каждому dq-флагу могли запускать много Spark actions;
-   - теперь все dq-флаги, total_count и total_bad считаются за один проход.
+2. Calculate DQ metrics with one aggregate.
+   Why:
+   - separate count() actions for every DQ flag would trigger multiple Spark actions;
+   - now all DQ flags, total_count, and total_bad are calculated in one pass.
 
-3. dq_df persistится как StorageLevel.DISK_ONLY.
-   Почему:
-   - dq_df используется несколько раз: для bad records, clean records, silver checks и записи;
-   - DISK_ONLY снижает recomputation, но не давит на JVM heap так сильно, как memory cache.
+3. Persist dq_df with StorageLevel.DISK_ONLY.
+   Why:
+   - dq_df is reused for DQ aggregation, bad records, clean records,
+     Silver validation, and Silver writing;
+   - DISK_ONLY reduces recomputation without putting additional pressure
+     on the JVM heap.
 
-4. silver_df не persistим.
-   Почему:
-   - silver_df строится от уже persisted dq_df;
-   - дополнительный persist silver_df может увеличить disk/memory pressure;
-   - раньше это могло приводить к рискам Java heap OOM.
+4. Do not persist silver_df.
+   Why:
+   - silver_df is built from the already persisted dq_df;
+   - persisting silver_df as well may increase disk or memory pressure;
+   - this avoids unnecessary cache pressure in a local Docker/Spark environment.
 
-5. Используем try/finally.
-   Почему:
-   - SparkSession должен закрываться даже при ошибке;
-   - persisted dq_df должен освобождаться даже при падении job.
+5. Use try/finally.
+   Why:
+   - SparkSession should be stopped even if the job fails;
+   - persisted dq_df should be released even if the job fails.
 """
 
 import argparse
 from functools import reduce
+from typing import List
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.column import Column
 from pyspark.sql.functions import (
     col,
     concat_ws,
@@ -81,8 +85,8 @@ def create_spark_session() -> SparkSession:
     """
     Create SparkSession with S3A settings.
 
-    validate_config() запускается до создания SparkSession, чтобы job падал сразу,
-    если не заданы обязательные переменные окружения для Object Storage.
+    validate_config() runs before SparkSession creation so the job fails fast
+    if required Object Storage configuration is missing.
     """
 
     validate_config()
@@ -105,24 +109,121 @@ def create_spark_session() -> SparkSession:
     )
 
 
-def build_bad_condition(dq_cols: list):
+def add_dq_columns(
+    df: DataFrame,
+    month_start: str,
+    next_month_start: str,
+) -> DataFrame:
     """
-    Build one boolean condition for all DQ checks.
+    Add trip duration and data quality columns to the Bronze dataframe.
 
-    Строка считается bad record, если хотя бы один dq-флаг равен True.
+    Why this function exists:
+    - it contains pure transformation logic;
+    - it does not read from S3;
+    - it does not write parquet;
+    - it can be tested with a small in-memory Spark DataFrame.
 
-    Было:
-        bad_condition = None
-        for c in dq_cols:
-            bad_condition = col(c) if bad_condition is None else bad_condition | col(c)
+    This makes Silver transformation rules testable without running the full job.
+    """
 
-    Стало:
-        reduce(...)
+    dq_df = df.withColumn(
+        "trip_duration_minutes",
+        (
+            unix_timestamp("tpep_dropoff_datetime")
+            - unix_timestamp("tpep_pickup_datetime")
+        )
+        / 60,
+    )
 
-    Почему так лучше:
-    - код короче;
-    - нет временного None;
-    - явно видно, что мы объединяем все dq-флаги через OR.
+    dq_df = (
+        dq_df
+        .withColumn("dq_null_pickup", col("tpep_pickup_datetime").isNull())
+        .withColumn(
+            "dq_outside_month",
+            col("tpep_pickup_datetime").isNotNull()
+            & (
+                (to_date("tpep_pickup_datetime") < lit(month_start).cast("date"))
+                | (
+                    to_date("tpep_pickup_datetime")
+                    >= lit(next_month_start).cast("date")
+                )
+            ),
+        )
+        .withColumn("dq_null_dropoff", col("tpep_dropoff_datetime").isNull())
+        .withColumn(
+            "dq_wrong_time",
+            col("tpep_dropoff_datetime") <= col("tpep_pickup_datetime"),
+        )
+        .withColumn("dq_bad_distance", col("trip_distance") <= 0)
+        .withColumn("dq_bad_fare", col("fare_amount") < 0)
+        .withColumn("dq_bad_total", col("total_amount") < 0)
+        .withColumn(
+            "dq_bad_passenger",
+            col("passenger_count").isNotNull() & (col("passenger_count") <= 0),
+        )
+        .withColumn(
+            "dq_bad_payment_type",
+            col("payment_type").isNull()
+            | (~col("payment_type").isin(VALID_PAYMENT_TYPES)),
+        )
+        .withColumn(
+            "dq_bad_pickup_location",
+            col("PULocationID").isNull() | (col("PULocationID") <= 0),
+        )
+        .withColumn(
+            "dq_bad_dropoff_location",
+            col("DOLocationID").isNull() | (col("DOLocationID") <= 0),
+        )
+        .withColumn(
+            "dq_bad_duration",
+            (col("trip_duration_minutes") <= 0)
+            | (col("trip_duration_minutes") > 1440),
+        )
+        .withColumn("dq_outlier_distance", col("trip_distance") > 100)
+    )
+
+    return dq_df
+
+
+def build_silver_dataframe(
+    clean_df: DataFrame,
+    dq_cols: List[str],
+) -> DataFrame:
+    """
+    Build the final Silver dataframe from clean records.
+
+    Why this function exists:
+    - it contains business transformation logic for the Silver layer;
+    - it can be tested separately from S3 reads and writes;
+    - unit tests can validate pickup_date, pickup_hour, pickup_month,
+      trip_type, and removed DQ columns.
+    """
+
+    return (
+        clean_df
+        .withColumn("pickup_date", to_date("tpep_pickup_datetime"))
+        .withColumn("pickup_hour", hour("tpep_pickup_datetime"))
+        .withColumn("pickup_month", date_format("tpep_pickup_datetime", "yyyy-MM"))
+        .withColumn(
+            "trip_type",
+            when(col("trip_distance") < 2, "short")
+            .when(col("trip_distance") <= 10, "medium")
+            .otherwise("long"),
+        )
+        .withColumn("silver_load_timestamp", current_timestamp())
+        .drop(*dq_cols)
+    )
+
+
+def build_bad_condition(dq_cols: List[str]) -> Column:
+    """
+    Build one boolean OR condition across all DQ flags.
+
+    A row is treated as a bad record if at least one DQ flag is True.
+
+    The previous implementation used a temporary None value and a for loop.
+    The current implementation uses reduce(), which makes the OR aggregation
+    across DQ flags explicit and avoids temporary mutable state.
     """
 
     if not dq_cols:
@@ -138,8 +239,8 @@ def build_bad_condition(dq_cols: list):
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
-    # dq_df объявляем заранее, чтобы в finally можно было безопасно вызвать unpersist().
-    # Если job упадёт до создания dq_df, переменная останется None.
+    # dq_df is defined before the try block so it can be safely unpersisted
+    # in finally. If the job fails before dq_df is created, it remains None.
     dq_df = None
 
     try:
@@ -151,131 +252,70 @@ def main(year: str, month: str) -> None:
         print(f"Reading bronze: {bronze_path}")
         df = spark.read.parquet(bronze_path)
 
-        # ВАЖНО:
-        # Раньше здесь был df.count().
+        # Do not run df.count() here.
         #
-        # total_count = df.count()
-        # print(f"Total rows: {total_count}")
+        # A separate count() would trigger an additional Spark action and
+        # force a full scan of the monthly Bronze parquet dataset in Object Storage.
         #
-        # Мы его убрали, потому что count() — это отдельный Spark action.
-        # Для monthly parquet в Object Storage это означает лишний полный проход по данным.
-        # Теперь total_count считается ниже вместе со всеми DQ-метриками одним aggregate.
+        # total_count is calculated later together with all DQ metrics in one
+        # aggregate action.
 
         month_start, next_month_start = get_month_boundaries(year, month)
 
         print(f"Expected pickup date range: [{month_start}, {next_month_start})")
 
         # ======================
-        # DATA QUALITY CHECKS
+        # DATA QUALITY COLUMNS
         # ======================
 
-        # Добавляем trip_duration_minutes до DQ-флагов, потому что он нужен
-        # для проверки dq_bad_duration.
-        dq_df = df.withColumn(
-            "trip_duration_minutes",
-            (
-                unix_timestamp("tpep_dropoff_datetime")
-                - unix_timestamp("tpep_pickup_datetime")
-            )
-            / 60,
-        )
-
-        # Добавляем набор boolean dq-флагов.
-        #
-        # Каждый флаг отвечает за отдельное правило качества.
-        # Позже мы:
-        # - посчитаем количество нарушений по каждому флагу;
-        # - соберём bad records;
-        # - удалим bad records из silver.
-        dq_df = (
-            dq_df
-            .withColumn("dq_null_pickup", col("tpep_pickup_datetime").isNull())
-            .withColumn(
-                "dq_outside_month",
-                col("tpep_pickup_datetime").isNotNull()
-                & (
-                    (to_date("tpep_pickup_datetime") < lit(month_start).cast("date"))
-                    | (
-                        to_date("tpep_pickup_datetime")
-                        >= lit(next_month_start).cast("date")
-                    )
-                ),
-            )
-            .withColumn("dq_null_dropoff", col("tpep_dropoff_datetime").isNull())
-            .withColumn(
-                "dq_wrong_time",
-                col("tpep_dropoff_datetime") <= col("tpep_pickup_datetime"),
-            )
-            .withColumn("dq_bad_distance", col("trip_distance") <= 0)
-            .withColumn("dq_bad_fare", col("fare_amount") < 0)
-            .withColumn("dq_bad_total", col("total_amount") < 0)
-            .withColumn(
-                "dq_bad_passenger",
-                col("passenger_count").isNotNull() & (col("passenger_count") <= 0),
-            )
-            .withColumn(
-                "dq_bad_payment_type",
-                col("payment_type").isNull()
-                | (~col("payment_type").isin(VALID_PAYMENT_TYPES)),
-            )
-            .withColumn(
-                "dq_bad_pickup_location",
-                col("PULocationID").isNull() | (col("PULocationID") <= 0),
-            )
-            .withColumn(
-                "dq_bad_dropoff_location",
-                col("DOLocationID").isNull() | (col("DOLocationID") <= 0),
-            )
-            .withColumn(
-                "dq_bad_duration",
-                (col("trip_duration_minutes") <= 0)
-                | (col("trip_duration_minutes") > 1440),
-            )
-            .withColumn("dq_outlier_distance", col("trip_distance") > 100)
+        # Add trip_duration_minutes and all DQ flags.
+        # trip_duration_minutes is required for dq_bad_duration.
+        dq_df = add_dq_columns(
+            df=df,
+            month_start=month_start,
+            next_month_start=next_month_start,
         )
 
         dq_cols = [c for c in dq_df.columns if c.startswith("dq_")]
 
-        # dq_df используется дальше несколько раз:
-        # 1. для DQ aggregate;
-        # 2. для bad_df.write;
-        # 3. для clean_df / silver_df;
-        # 4. для silver quality checks;
-        # 5. для silver_df.write.
+        # dq_df is reused several times:
+        # 1. DQ aggregate;
+        # 2. bad records write;
+        # 3. clean_df and silver_df creation;
+        # 4. Silver quality checks;
+        # 5. Silver write.
         #
-        # Поэтому persist помогает не пересчитывать всю цепочку DQ-колонок каждый раз.
+        # Persisting dq_df reduces recomputation of the DQ transformation chain.
         #
-        # Почему DISK_ONLY:
-        # - monthly taxi data может быть большим;
-        # - MEMORY_ONLY / MEMORY_AND_DISK могут давить на JVM heap;
-        # - DISK_ONLY безопаснее для локального Docker/Spark окружения.
+        # Why DISK_ONLY:
+        # - monthly taxi data can be large;
+        # - MEMORY_ONLY or MEMORY_AND_DISK may increase JVM heap pressure;
+        # - DISK_ONLY is safer for the local Docker/Spark environment.
         dq_df = dq_df.persist(StorageLevel.DISK_ONLY)
 
         # ======================
         # BAD RECORDS CONDITION
         # ======================
 
-        # bad_condition = OR по всем dq-флагам.
-        # Если хотя бы один dq-флаг True, строка считается плохой.
+        # A row is bad if at least one DQ flag is True.
         bad_condition = build_bad_condition(dq_cols)
 
         # ======================
         # DATA QUALITY AGGREGATION
         # ======================
 
-        # ВАЖНОЕ ИЗМЕНЕНИЕ:
-        # total_count теперь считается здесь же, вместе со всеми DQ-флагами.
+        # total_count is calculated here together with all DQ flag counts.
         #
-        # Это заменяет отдельный df.count() в начале job.
+        # This replaces a separate df.count() at the beginning of the job.
         #
-        # Было:
+        # Before:
         # - action 1: df.count()
         # - action 2: dq_df.agg(...).collect()
         #
-        # Стало:
+        # After:
         # - action 1: dq_df.agg(total_count, dq flags, total_bad).collect()
         #
-        # Так мы убираем один лишний полный проход по bronze dataset.
+        # This removes one redundant full scan of the Bronze dataset.
         report_agg_expressions = [
             spark_count("*").cast("long").alias("total_count"),
             *[
@@ -304,9 +344,8 @@ def main(year: str, month: str) -> None:
 
         bad_df = dq_df.filter(bad_condition)
 
-        # dq_reason собирает список dq-флагов, которые сработали для строки.
-        # Это полезно для анализа качества данных: можно понять, почему запись
-        # попала в bad records.
+        # dq_reason stores the list of DQ flags that failed for each bad record.
+        # This makes bad records easier to inspect and debug.
         bad_df = bad_df.withColumn(
             "dq_reason",
             concat_ws(
@@ -322,47 +361,36 @@ def main(year: str, month: str) -> None:
         # CLEAN DATA
         # ======================
 
-        # clean_df — это все строки, где не сработал ни один dq-флаг.
+        # clean_df contains only records where no DQ flag is True.
         clean_df = dq_df.filter(~bad_condition)
 
-        # silver_df — чистый слой с производными аналитическими полями.
+        # silver_df is the cleaned analytical layer.
         #
-        # Здесь добавляем:
-        # - pickup_date для daily/monthly analytics;
-        # - pickup_hour для hourly demand analytics;
-        # - pickup_month для monthly trends;
-        # - trip_type для short/medium/long analysis;
-        # - silver_load_timestamp для auditability.
+        # It adds:
+        # - pickup_date for daily and monthly analytics;
+        # - pickup_hour for hourly demand analytics;
+        # - pickup_month for monthly trends;
+        # - trip_type for short, medium, and long trip analysis;
+        # - silver_load_timestamp for auditability.
         #
-        # dq_cols удаляем, потому что DQ-флаги нужны для контроля качества,
-        # но не должны попадать в чистый silver contract.
-        silver_df = (
-            clean_df
-            .withColumn("pickup_date", to_date("tpep_pickup_datetime"))
-            .withColumn("pickup_hour", hour("tpep_pickup_datetime"))
-            .withColumn("pickup_month", date_format("tpep_pickup_datetime", "yyyy-MM"))
-            .withColumn(
-                "trip_type",
-                when(col("trip_distance") < 2, "short")
-                .when(col("trip_distance") <= 10, "medium")
-                .otherwise("long"),
-            )
-            .withColumn("silver_load_timestamp", current_timestamp())
-            .drop(*dq_cols)
+        # DQ columns are dropped because they are quality-control metadata and
+        # should not be part of the clean Silver contract.
+        silver_df = build_silver_dataframe(
+            clean_df=clean_df,
+            dq_cols=dq_cols,
         )
 
         # ======================
         # SILVER QUALITY CHECKS
         # ======================
 
-        # Проверяем, что после очистки silver действительно соответствует
-        # базовому контракту:
-        # - pickup_date внутри ожидаемого месяца;
-        # - pickup_hour в диапазоне 0..23;
-        # - silver_count считаем для логирования и quality report.
+        # Validate the clean Silver dataset before writing:
+        # - pickup_date must be inside the expected month;
+        # - pickup_hour must be in the 0..23 range;
+        # - silver_count is calculated for logging and row-loss reporting.
         #
-        # Это отдельный action, но он работает от persisted dq_df,
-        # поэтому не должен заново читать bronze parquet из Object Storage.
+        # This is a separate action, but it is based on the persisted dq_df,
+        # so it should not re-read the Bronze parquet dataset from Object Storage.
         silver_quality_counts = silver_df.agg(
             spark_count("*").cast("long").alias("silver_count"),
             spark_sum(
@@ -410,11 +438,11 @@ def main(year: str, month: str) -> None:
         # QUALITY REPORT
         # ======================
 
-        # Собираем маленький quality report из уже посчитанных report_counts.
+        # Build a small quality report from the already calculated report_counts.
         #
-        # Важно:
-        # здесь мы НЕ запускаем новые count() по каждому dq-флагу.
-        # Все значения берутся из одного общего aggregate выше.
+        # Important:
+        # this does not run additional count() actions for each DQ flag.
+        # All values come from the shared aggregate above.
         report_data = []
 
         for c in dq_cols:
@@ -433,25 +461,23 @@ def main(year: str, month: str) -> None:
             .withColumn("created_at", current_timestamp())
         )
 
-        # report_df маленький: в нём одна строка на DQ-check.
-        # show() здесь не создаёт большой нагрузки и полезен в Airflow logs.
+        # report_df is small: one row per DQ check.
+        # show() is useful in Airflow logs and does not add meaningful load here.
         report_df.show(truncate=False)
 
         print(f"Writing quality report to: {quality_path}")
         report_df.write.mode("overwrite").parquet(quality_path)
 
-        print("Silver job DONE ✅")
+        print("Silver job completed successfully")
 
     finally:
-        # ВАЖНО:
-        # Если dq_df был persisted, освобождаем его даже при ошибке.
-        # Это особенно важно для Airflow/Spark jobs, чтобы не оставлять
-        # лишние persisted blocks между этапами.
+        # If dq_df was persisted, release it even if the job fails.
+        # This avoids leaving unnecessary persisted blocks in Spark.
         if dq_df is not None:
             dq_df.unpersist()
 
-        # SparkSession закрываем всегда.
-        # Если job упадёт на read/write/validation, Spark всё равно остановится.
+        # Always stop SparkSession.
+        # If the job fails during read, write, or validation, Spark still stops.
         spark.stop()
 
 
