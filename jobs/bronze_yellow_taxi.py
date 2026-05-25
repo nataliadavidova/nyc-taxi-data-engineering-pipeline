@@ -48,39 +48,38 @@ def create_spark_session() -> SparkSession:
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
-    input_path = raw_yellow_path(year, month)
-    output_path = bronze_yellow_path(year, month)
+    try:
+        input_path = raw_yellow_path(year, month)
+        output_path = bronze_yellow_path(year, month)
 
-    print(f"Reading raw data from: {input_path}")
+        print(f"Reading raw data from: {input_path}")
 
-    df = spark.read.parquet(input_path)
+        df = spark.read.parquet(input_path)
 
-    bronze_df = (
-        df
-        .withColumn("load_timestamp", current_timestamp())
-        .withColumn("source_system", lit("nyc_taxi_yellow"))
-        .withColumn("source_year", lit(year))
-        .withColumn("source_month", lit(month))
-    )
+        bronze_df = (
+            df
+            .withColumn("load_timestamp", current_timestamp())
+            .withColumn("source_system", lit("nyc_taxi_yellow"))
+            .withColumn("source_year", lit(year))
+            .withColumn("source_month", lit(month))
+        )
 
-    print("Schema:")
-    bronze_df.printSchema()
+        print("Schema:")
+        bronze_df.printSchema()
 
-    rows_count = bronze_df.count()
-    print(f"Rows count: {rows_count}")
+        print(f"Writing bronze data to: {output_path}")
 
-    print(f"Writing bronze data to: {output_path}")
+        (
+            bronze_df
+            .write
+            .mode("overwrite")
+            .parquet(output_path)
+        )
 
-    (
-        bronze_df
-        .write
-        .mode("overwrite")
-        .parquet(output_path)
-    )
+        print("Bronze job completed successfully")
 
-    print("Bronze job completed successfully")
-
-    spark.stop()
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":

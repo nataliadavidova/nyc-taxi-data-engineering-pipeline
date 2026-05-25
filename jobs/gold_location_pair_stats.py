@@ -1,5 +1,65 @@
 """
 Gold job: pickup/dropoff location pair statistics.
+
+Что делает:
+1. Читает Silver layer для конкретного года и месяца.
+2. Агрегирует поездки до уровня:
+   - pickup_date;
+   - trip_type;
+   - PULocationID;
+   - DOLocationID.
+3. Считает route-level метрики:
+   - trips_count;
+   - total_revenue;
+   - avg_check;
+   - avg_trip_distance;
+   - avg_trip_duration_minutes.
+4. Обогащает pickup/dropoff location IDs читаемыми taxi zone names через lookup.
+5. Записывает результат в Gold layer.
+
+Оптимизационные решения:
+1. Убрали silver_df.count().
+   Почему:
+   - count() — отдельный Spark action;
+   - он полностью сканирует Silver parquet;
+   - затем write() снова читает Silver parquet для построения gold mart;
+   - проверка, что Silver не пустой, уже выполняется в check_yellow_taxi_quality.py.
+
+2. Убрали gold_df.show().
+   Почему:
+   - show() тоже Spark action;
+   - он заставляет Spark посчитать gold_df до записи;
+   - затем write() считает gold_df повторно;
+   - для production-like pipeline preview лучше делать отдельным read/query после записи.
+
+3. Убрали orderBy(...) перед записью.
+   Почему:
+   - Parquet dataset не гарантирует порядок строк при последующем чтении;
+   - сортировка должна выполняться в SQL/ClickHouse/Superset при использовании данных;
+   - для location pair mart строк много, поэтому orderBy может добавить дорогой sort/shuffle.
+
+4. Сохранили агрегацию до join.
+   Почему:
+   - silver_df большой;
+   - taxi zone lookup маленький;
+   - сначала агрегируем большой dataset до route-level grain;
+   - потом джойним уже уменьшенный aggregated_df с маленьким lookup.
+
+5. Сохранили broadcast для lookup.
+   Почему:
+   - taxi_zone_lookup.csv маленький справочник;
+   - broadcast join позволяет разослать lookup на executors;
+   - это дешевле, чем shuffle join большого aggregated_df со справочником.
+
+6. Не используем cache/persist.
+   Почему:
+   - после удаления count() и show() остаётся один основной action: write();
+   - silver_df не используется несколькими независимыми actions;
+   - cache/persist здесь только добавил бы лишнее давление на память/диск.
+
+7. Добавили try/finally.
+   Почему:
+   - SparkSession должен закрываться даже если чтение, join, aggregation или write упадут.
 """
 
 import argparse
@@ -20,6 +80,12 @@ from config import (
 
 
 def create_spark_session() -> SparkSession:
+    """
+    Create SparkSession with S3A settings.
+
+    validate_config() проверяет обязательные переменные окружения до старта Spark job.
+    """
+
     validate_config()
 
     return (
@@ -43,92 +109,133 @@ def create_spark_session() -> SparkSession:
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
-    silver_path = silver_yellow_path(year, month)
-    gold_path = gold_location_pair_stats_path(year, month)
+    try:
+        silver_path = silver_yellow_path(year, month)
+        gold_path = gold_location_pair_stats_path(year, month)
+        lookup_path = taxi_zone_lookup_path()
 
-    print(f"Reading silver data from: {silver_path}")
+        print(f"Reading silver data from: {silver_path}")
+        silver_df = spark.read.parquet(silver_path)
 
-    silver_df = spark.read.parquet(silver_path)
+        # ВАЖНО:
+        # Не делаем silver_df.count().
+        #
+        # Почему:
+        # - count() запускает отдельный Spark action;
+        # - Spark полностью читает Silver parquet;
+        # - затем write() ниже снова читает Silver parquet, чтобы построить gold mart.
+        #
+        # Проверка, что Silver не пустой, уже есть в:
+        # jobs/check_yellow_taxi_quality.py
 
-    print(f"Silver rows count: {silver_df.count()}")
+        print(f"Reading taxi zone lookup from: {lookup_path}")
 
-    lookup_path = taxi_zone_lookup_path()
-
-    print(f"Reading taxi zone lookup from: {lookup_path}")
-
-    zones_df = (
-        spark.read
-        .option("header", "true")
-        .csv(lookup_path)
-    )
-
-    aggregated_df = (
-        silver_df
-        .groupBy("pickup_date", "trip_type", "PULocationID", "DOLocationID")
-        .agg(
-            count("*").alias("trips_count"),
-            round(sum("total_amount"), 2).alias("total_revenue"),
-            round(avg("total_amount"), 2).alias("avg_check"),
-            round(avg("trip_distance"), 2).alias("avg_trip_distance"),
-            round(avg("trip_duration_minutes"), 2).alias("avg_trip_duration_minutes"),
+        zones_df = (
+            spark.read
+            .option("header", "true")
+            .csv(lookup_path)
         )
-    )
 
-    pickup_zones_df = (
-        zones_df
-        .select(
-            col("LocationID").cast("int").alias("pickup_location_id"),
-            col("Borough").alias("pickup_borough"),
-            col("Zone").alias("pickup_zone"),
-            col("service_zone").alias("pickup_service_zone"),
+        # Сначала агрегируем большой Silver dataset.
+        #
+        # Это правильный порядок:
+        # - silver_df содержит много строк поездок;
+        # - aggregated_df уже содержит route-level статистику;
+        # - после агрегации данных меньше, и join со справочником дешевле.
+        aggregated_df = (
+            silver_df
+            .groupBy("pickup_date", "trip_type", "PULocationID", "DOLocationID")
+            .agg(
+                count("*").alias("trips_count"),
+                round(sum("total_amount"), 2).alias("total_revenue"),
+                round(avg("total_amount"), 2).alias("avg_check"),
+                round(avg("trip_distance"), 2).alias("avg_trip_distance"),
+                round(avg("trip_duration_minutes"), 2).alias(
+                    "avg_trip_duration_minutes"
+                ),
+            )
         )
-    )
 
-    dropoff_zones_df = (
-        zones_df
-        .select(
-            col("LocationID").cast("int").alias("dropoff_location_id"),
-            col("Borough").alias("dropoff_borough"),
-            col("Zone").alias("dropoff_zone"),
-            col("service_zone").alias("dropoff_service_zone"),
+        # Готовим lookup для pickup location.
+        #
+        # LocationID приводим к int, чтобы join key был числовым.
+        # Остальные поля переименовываем, чтобы после двух join не было конфликтов имён.
+        pickup_zones_df = (
+            zones_df
+            .select(
+                col("LocationID").cast("int").alias("pickup_location_id"),
+                col("Borough").alias("pickup_borough"),
+                col("Zone").alias("pickup_zone"),
+                col("service_zone").alias("pickup_service_zone"),
+            )
         )
-    )
 
-    gold_df = (
-        aggregated_df
-        .withColumnRenamed("PULocationID", "pickup_location_id")
-        .withColumnRenamed("DOLocationID", "dropoff_location_id")
-        .join(
-            broadcast(pickup_zones_df),
-            on="pickup_location_id",
-            how="left",
+        # Готовим lookup для dropoff location.
+        #
+        # Используем тот же справочник, но с другими alias-именами колонок.
+        dropoff_zones_df = (
+            zones_df
+            .select(
+                col("LocationID").cast("int").alias("dropoff_location_id"),
+                col("Borough").alias("dropoff_borough"),
+                col("Zone").alias("dropoff_zone"),
+                col("service_zone").alias("dropoff_service_zone"),
+            )
         )
-        .join(
-            broadcast(dropoff_zones_df),
-            on="dropoff_location_id",
-            how="left",
+
+        gold_df = (
+            aggregated_df
+            .withColumnRenamed("PULocationID", "pickup_location_id")
+            .withColumnRenamed("DOLocationID", "dropoff_location_id")
+            .join(
+                broadcast(pickup_zones_df),
+                on="pickup_location_id",
+                how="left",
+            )
+            .join(
+                broadcast(dropoff_zones_df),
+                on="dropoff_location_id",
+                how="left",
+            )
+            .withColumn("year", col("pickup_date").substr(1, 4))
+            .withColumn("month", col("pickup_date").substr(6, 2))
+            .withColumn("gold_load_timestamp", current_timestamp())
         )
-        .withColumn("year", col("pickup_date").substr(1, 4))
-        .withColumn("month", col("pickup_date").substr(6, 2))
-        .withColumn("gold_load_timestamp", current_timestamp())
-        .orderBy("pickup_date", "trip_type", col("trips_count").desc())
-    )
 
-    print("Gold location pair preview:")
-    gold_df.show(20, truncate=False)
+        # ВАЖНО:
+        # Не делаем gold_df.show().
+        #
+        # Почему:
+        # - show() запускает отдельный Spark action;
+        # - затем write() запускает ещё один Spark action;
+        # - без cache/persist это может повторно пересчитать gold_df.
+        #
+        # Если нужен preview, лучше проверять результат после записи:
+        # spark.read.parquet(gold_path).show(...)
+        # или через ClickHouse после загрузки.
 
-    print(f"Writing gold data to: {gold_path}")
+        # ВАЖНО:
+        # Не делаем orderBy(...) перед записью.
+        #
+        # Почему:
+        # - для Parquet порядок строк не является гарантированным контрактом;
+        # - при следующем чтении Spark может читать part-файлы в другом порядке;
+        # - для сортировки результата используем ORDER BY в ClickHouse/Superset;
+        # - в этом mart строк много, поэтому global sort может быть дорогим.
 
-    (
-        gold_df
-        .write
-        .mode("overwrite")
-        .parquet(gold_path)
-    )
+        print(f"Writing gold data to: {gold_path}")
 
-    print("Gold location pair stats job completed successfully")
+        (
+            gold_df
+            .write
+            .mode("overwrite")
+            .parquet(gold_path)
+        )
 
-    spark.stop()
+        print("Gold location pair stats job completed successfully")
+
+    finally:
+        spark.stop()
 
 
 if __name__ == "__main__":

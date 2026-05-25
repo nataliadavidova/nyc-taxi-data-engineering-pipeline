@@ -33,7 +33,7 @@ This project demonstrates core data engineering practices:
 - Added data quality checks for Silver, Gold Object Storage, and ClickHouse layers to prevent invalid data from reaching BI reports.
 - Added geospatial enrichment using taxi zone centroid coordinates for pickup and dropoff demand maps.
 - Added automated tests and GitHub Actions CI to validate configuration helpers, DAG imports, and Airflow task dependencies.
-- Optimized the Silver Spark job by reducing repeated Spark actions and Object Storage reads, improving local monthly job runtime by approximately 2 minutes on average.
+- Optimized Spark, Object Storage, quality-check, and ClickHouse load jobs by reducing redundant actions, repeated scans, and unnecessary sorting while keeping pipeline logic unchanged.
 
 ## Business Value
 
@@ -824,23 +824,32 @@ PYTHONPATH=jobs python -m pytest tests -v
 
 This helps ensure that changes do not break configuration helpers, Airflow DAG imports, or task dependencies before they are merged into `main`.
 
-## Spark Job Optimization
+## Pipeline Optimization
 
-The Silver Spark job was optimized to reduce repeated Spark actions and improve pipeline stability.
+The project includes an optimization pass across Spark, Object Storage, ClickHouse loading jobs, and quality checks.
 
-Previously, the Silver job calculated data quality metrics by running a separate `count()` action for each DQ flag. This caused multiple repeated passes over the same monthly dataset and increased the amount of repeated reads from Object Storage.
-
-The optimized version calculates DQ metrics in a single aggregation step.
+The main goal was to reduce redundant Spark actions, avoid repeated reads from Object Storage, make quality checks more efficient, and improve production-like reliability without changing the business logic of the pipeline.
 
 Main improvements:
 
-- DQ metrics are calculated with one aggregate operation instead of multiple separate `count()` actions;
-- repeated Spark actions were reduced;
-- repeated reads from Object Storage were reduced;
-- `dq_df` is persisted with `StorageLevel.DISK_ONLY` to reduce recomputation without increasing Java heap pressure;
-- `silver_df` is not cached in memory to avoid Java heap out-of-memory errors.
+- removed non-critical `count()` actions used only for logging before write operations;
+- removed `show()` preview actions from production-like Spark jobs;
+- removed unnecessary `orderBy()` operations before writing Parquet datasets, because row order is not a reliable storage contract for Parquet and should be handled in SQL or BI queries;
+- consolidated multiple data quality checks into single aggregate operations where possible;
+- reduced repeated reads from Object Storage in Silver, Gold, and quality-check jobs;
+- kept `dq_df` persisted with `StorageLevel.DISK_ONLY` in the Silver job to reduce recomputation without increasing Java heap pressure;
+- avoided caching large intermediate DataFrames such as `silver_df` to reduce Java heap out-of-memory risks;
+- replaced full parquet `count()` checks in ClickHouse load jobs with lightweight `take(1)` non-empty checks;
+- replaced full ClickHouse table counts after monthly loads with targeted counts for the loaded `year` and `month`;
+- consolidated final ClickHouse quality checks into fewer aggregate SQL queries;
+- added `try/finally` blocks to Spark jobs to ensure `spark.stop()` is called even if a job fails;
+- improved the taxi zone centroid loader with stronger validation checks, a working-directory-independent CSV path, and explicit handling of known duplicate `location_id` values caused by multi-part taxi zone geometries.
 
-As a result, monthly Silver jobs became more stable and, during local testing, completed approximately 2 minutes faster on average.
+As a result, the pipeline now performs fewer redundant actions, avoids several repeated full scans, and provides more reliable validation while keeping the data processing logic unchanged.
+
+During local benchmarking, the strongest runtime improvements were observed in quality-check jobs where multiple repeated `count()` actions were consolidated into single aggregate checks. Smaller but consistent improvements were also observed in Gold mart and ClickHouse load jobs after removing non-critical actions and unnecessary sorting before Parquet writes.
+
+During a full-year local Airflow DAG run, total pipeline runtime decreased from approximately 2 hours 2 minutes before the optimization pass to approximately 1 hour 39 minutes after the optimization pass. This reduced the full DAG runtime by about 23 minutes, or approximately 18.9%.
 
 ## How to Run Locally
 

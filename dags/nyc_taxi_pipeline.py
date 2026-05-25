@@ -188,19 +188,12 @@ with DAG(
             gold_location,
         ] >> check_gold_schema
 
-        [
-            gold_hourly,
-            gold_daily,
-            gold_payment,
-            gold_location,
-        ] >> check_gold_schema
-
         check_gold_schema >> [
             load_gold_hourly,
             load_gold_daily,
             load_gold_payment,
             load_gold_location,
-                ]
+        ]
 
         previous_month_final_tasks = [
             load_gold_hourly,
