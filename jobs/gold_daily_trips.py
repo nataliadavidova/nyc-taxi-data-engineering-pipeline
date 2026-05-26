@@ -1,50 +1,47 @@
 """
 Gold job: daily trips analytics.
 
-Что делает:
-1. Читает Silver layer для конкретного года и месяца.
-2. Агрегирует данные до дневного уровня.
-3. Считает daily taxi metrics:
-   - trips_count;
-   - total_revenue;
-   - avg_check;
-   - avg_trip_distance;
-   - avg_trip_duration_minutes;
-   - short_trips_count;
-   - medium_trips_count;
-   - long_trips_count.
-4. Записывает результат в Gold layer.
+What this job does:
+1. Reads the monthly Silver layer from Object Storage.
+2. Builds a daily analytical mart.
+3. Writes the daily Gold mart back to Object Storage.
 
-Оптимизационные решения:
-1. Убрали silver_df.count().
-   Почему:
-   - count() — отдельный Spark action;
-   - он заставляет Spark полностью читать Silver parquet;
-   - затем write() снова читает Silver parquet;
-   - проверка, что Silver не пустой, уже есть в check_yellow_taxi_quality.py.
+Optimization decisions:
+1. Do not run silver_df.count() only for logging.
+   Why:
+   - count() is a separate Spark action;
+   - the write action already needs to scan the dataset.
 
-2. Убрали gold_df.show().
-   Почему:
-   - show() тоже Spark action;
-   - он пересчитывает gold_df до записи;
-   - затем write() пересчитывает gold_df повторно;
-   - preview полезен для debug, но не нужен в production-like pipeline.
+2. Do not run gold_df.show().
+   Why:
+   - show() is also a Spark action;
+   - production-like jobs should avoid preview actions unless they are required.
 
-3. Убрали orderBy("pickup_date") перед записью.
-   Почему:
-   - Parquet не требует сортировки строк при записи;
-   - порядок строк лучше задавать при чтении/аналитическом запросе;
-   - orderBy может добавлять лишний sort/shuffle.
+3. Do not order data before writing parquet.
+   Why:
+   - row order is not a reliable storage contract for parquet datasets;
+   - ordering should be done in SQL or BI queries when reading data.
 
-4. Добавили try/finally.
-   Почему:
-   - SparkSession должен закрываться даже если чтение, агрегация или запись упадут.
+4. Put transformation logic into build_gold_daily_trips().
+   Why:
+   - the function contains pure Spark transformation logic;
+   - it can be tested with a small in-memory Spark DataFrame;
+   - tests do not need S3 or parquet writes.
 """
 
 import argparse
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, col, count, current_timestamp, round, sum, when
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import (
+    avg,
+    col,
+    count,
+    current_timestamp,
+    date_format,
+    round,
+    sum,
+    when,
+)
 
 from config import (
     AWS_ACCESS_KEY_ID,
@@ -58,6 +55,13 @@ from config import (
 
 
 def create_spark_session() -> SparkSession:
+    """
+    Create SparkSession with S3A settings.
+
+    validate_config() runs before SparkSession creation so the job fails fast
+    if required Object Storage configuration is missing.
+    """
+
     validate_config()
 
     return (
@@ -78,6 +82,51 @@ def create_spark_session() -> SparkSession:
     )
 
 
+def build_gold_daily_trips(silver_df: DataFrame) -> DataFrame:
+    """
+    Build the daily trips Gold mart from the Silver dataframe.
+
+    The output is aggregated by pickup_date and contains:
+    - trip count;
+    - total revenue;
+    - average check;
+    - average distance;
+    - average duration;
+    - trip counts by trip type;
+    - year/month partition helper columns;
+    - gold load timestamp.
+
+    This function does not read or write data. It contains only transformation
+    logic and can be tested with a small in-memory Spark DataFrame.
+    """
+
+    return (
+        silver_df
+        .groupBy("pickup_date")
+        .agg(
+            count("*").alias("trips_count"),
+            round(sum("total_amount"), 2).alias("total_revenue"),
+            round(avg("total_amount"), 2).alias("avg_check"),
+            round(avg("trip_distance"), 2).alias("avg_trip_distance"),
+            round(avg("trip_duration_minutes"), 2).alias(
+                "avg_trip_duration_minutes"
+            ),
+            sum(when(col("trip_type") == "short", 1).otherwise(0)).alias(
+                "short_trips_count"
+            ),
+            sum(when(col("trip_type") == "medium", 1).otherwise(0)).alias(
+                "medium_trips_count"
+            ),
+            sum(when(col("trip_type") == "long", 1).otherwise(0)).alias(
+                "long_trips_count"
+            ),
+        )
+        .withColumn("year", date_format(col("pickup_date"), "yyyy"))
+        .withColumn("month", date_format(col("pickup_date"), "MM"))
+        .withColumn("gold_load_timestamp", current_timestamp())
+    )
+
+
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
@@ -89,55 +138,13 @@ def main(year: str, month: str) -> None:
 
         silver_df = spark.read.parquet(silver_path)
 
-        # ВАЖНО:
-        # Не делаем silver_df.count() здесь.
+        # Do not run silver_df.count() here.
         #
-        # Почему:
-        # - это отдельный Spark action;
-        # - он полностью сканирует Silver parquet;
-        # - затем write() ниже снова читает эти же данные.
-        #
-        # Проверка, что Silver не пустой, уже выполняется отдельным DQ job:
-        # jobs/check_yellow_taxi_quality.py
+        # count() would trigger an extra Spark action and a full scan of the
+        # Silver parquet dataset. The write action below already scans the data.
+        gold_df = build_gold_daily_trips(silver_df)
 
-        gold_df = (
-            silver_df
-            .groupBy("pickup_date")
-            .agg(
-                count("*").alias("trips_count"),
-                round(sum("total_amount"), 2).alias("total_revenue"),
-                round(avg("total_amount"), 2).alias("avg_check"),
-                round(avg("trip_distance"), 2).alias("avg_trip_distance"),
-                round(avg("trip_duration_minutes"), 2).alias(
-                    "avg_trip_duration_minutes"
-                ),
-                sum(
-                    when(col("trip_type") == "short", 1).otherwise(0)
-                ).alias("short_trips_count"),
-                sum(
-                    when(col("trip_type") == "medium", 1).otherwise(0)
-                ).alias("medium_trips_count"),
-                sum(
-                    when(col("trip_type") == "long", 1).otherwise(0)
-                ).alias("long_trips_count"),
-            )
-            .withColumn("year", col("pickup_date").substr(1, 4))
-            .withColumn("month", col("pickup_date").substr(6, 2))
-            .withColumn("gold_load_timestamp", current_timestamp())
-        )
-
-        # ВАЖНО:
-        # Не делаем gold_df.show() в production-like job.
-        #
-        # Почему:
-        # - show() запускает Spark action;
-        # - затем write() запускает ещё один Spark action;
-        # - это может привести к повторному чтению Silver parquet.
-        #
-        # Если нужен preview, лучше смотреть результат отдельным read/query
-        # после записи или через ClickHouse/Superset.
-
-        print(f"Writing gold data to: {gold_path}")
+        print(f"Writing gold daily trips data to: {gold_path}")
 
         (
             gold_df

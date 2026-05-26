@@ -64,7 +64,7 @@ Gold job: pickup/dropoff location pair statistics.
 
 import argparse
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import avg, broadcast, col, count, current_timestamp, round, sum
 
 from config import (
@@ -106,6 +106,83 @@ def create_spark_session() -> SparkSession:
     )
 
 
+def build_gold_location_pair_stats(
+    silver_df: DataFrame,
+    zones_df: DataFrame,
+) -> DataFrame:
+    """
+    Build the pickup/dropoff location pair Gold mart.
+
+    The function preserves the current optimized transformation logic:
+    1. Aggregate the large Silver dataset first.
+    2. Prepare pickup and dropoff lookup DataFrames from the small taxi zone lookup.
+    3. Enrich aggregated route-level records with pickup/dropoff zone attributes.
+    4. Add year, month, and gold load timestamp.
+
+    Why aggregation happens before the joins:
+    - silver_df contains trip-level records and can be large;
+    - taxi zone lookup is small;
+    - aggregating first reduces the number of rows before enrichment;
+    - joining the smaller aggregated dataset is cheaper.
+
+    This function does not read or write data, so it can be tested with small
+    in-memory Spark DataFrames.
+    """
+
+    aggregated_df = (
+        silver_df
+        .groupBy("pickup_date", "trip_type", "PULocationID", "DOLocationID")
+        .agg(
+            count("*").alias("trips_count"),
+            round(sum("total_amount"), 2).alias("total_revenue"),
+            round(avg("total_amount"), 2).alias("avg_check"),
+            round(avg("trip_distance"), 2).alias("avg_trip_distance"),
+            round(avg("trip_duration_minutes"), 2).alias(
+                "avg_trip_duration_minutes"
+            ),
+        )
+    )
+
+    pickup_zones_df = (
+        zones_df
+        .select(
+            col("LocationID").cast("int").alias("pickup_location_id"),
+            col("Borough").alias("pickup_borough"),
+            col("Zone").alias("pickup_zone"),
+            col("service_zone").alias("pickup_service_zone"),
+        )
+    )
+
+    dropoff_zones_df = (
+        zones_df
+        .select(
+            col("LocationID").cast("int").alias("dropoff_location_id"),
+            col("Borough").alias("dropoff_borough"),
+            col("Zone").alias("dropoff_zone"),
+            col("service_zone").alias("dropoff_service_zone"),
+        )
+    )
+
+    return (
+        aggregated_df
+        .withColumnRenamed("PULocationID", "pickup_location_id")
+        .withColumnRenamed("DOLocationID", "dropoff_location_id")
+        .join(
+            broadcast(pickup_zones_df),
+            on="pickup_location_id",
+            how="left",
+        )
+        .join(
+            broadcast(dropoff_zones_df),
+            on="dropoff_location_id",
+            how="left",
+        )
+        .withColumn("year", col("pickup_date").substr(1, 4))
+        .withColumn("month", col("pickup_date").substr(6, 2))
+        .withColumn("gold_load_timestamp", current_timestamp())
+    )
+
+
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
@@ -142,64 +219,10 @@ def main(year: str, month: str) -> None:
         # - silver_df содержит много строк поездок;
         # - aggregated_df уже содержит route-level статистику;
         # - после агрегации данных меньше, и join со справочником дешевле.
-        aggregated_df = (
-            silver_df
-            .groupBy("pickup_date", "trip_type", "PULocationID", "DOLocationID")
-            .agg(
-                count("*").alias("trips_count"),
-                round(sum("total_amount"), 2).alias("total_revenue"),
-                round(avg("total_amount"), 2).alias("avg_check"),
-                round(avg("trip_distance"), 2).alias("avg_trip_distance"),
-                round(avg("trip_duration_minutes"), 2).alias(
-                    "avg_trip_duration_minutes"
-                ),
-            )
-        )
 
-        # Готовим lookup для pickup location.
-        #
-        # LocationID приводим к int, чтобы join key был числовым.
-        # Остальные поля переименовываем, чтобы после двух join не было конфликтов имён.
-        pickup_zones_df = (
-            zones_df
-            .select(
-                col("LocationID").cast("int").alias("pickup_location_id"),
-                col("Borough").alias("pickup_borough"),
-                col("Zone").alias("pickup_zone"),
-                col("service_zone").alias("pickup_service_zone"),
-            )
-        )
-
-        # Готовим lookup для dropoff location.
-        #
-        # Используем тот же справочник, но с другими alias-именами колонок.
-        dropoff_zones_df = (
-            zones_df
-            .select(
-                col("LocationID").cast("int").alias("dropoff_location_id"),
-                col("Borough").alias("dropoff_borough"),
-                col("Zone").alias("dropoff_zone"),
-                col("service_zone").alias("dropoff_service_zone"),
-            )
-        )
-
-        gold_df = (
-            aggregated_df
-            .withColumnRenamed("PULocationID", "pickup_location_id")
-            .withColumnRenamed("DOLocationID", "dropoff_location_id")
-            .join(
-                broadcast(pickup_zones_df),
-                on="pickup_location_id",
-                how="left",
-            )
-            .join(
-                broadcast(dropoff_zones_df),
-                on="dropoff_location_id",
-                how="left",
-            )
-            .withColumn("year", col("pickup_date").substr(1, 4))
-            .withColumn("month", col("pickup_date").substr(6, 2))
-            .withColumn("gold_load_timestamp", current_timestamp())
+        gold_df = build_gold_location_pair_stats(
+            silver_df=silver_df,
+            zones_df=zones_df,
         )
 
         # ВАЖНО:

@@ -59,15 +59,15 @@ Gold job: payment type statistics.
 
 import argparse
 
-from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.functions import (
     avg,
     col,
     count,
     current_timestamp,
-    lit,
     round,
     sum,
+    lit,
     when,
 )
 
@@ -109,6 +109,84 @@ def create_spark_session() -> SparkSession:
     )
 
 
+def build_gold_payment_type_stats(silver_df: DataFrame) -> DataFrame:
+    """
+    Build the payment type Gold mart from the Silver dataframe.
+
+    The output is aggregated by:
+    - pickup_date;
+    - trip_type;
+    - payment_type;
+    - payment_type_name.
+
+    Important:
+    This function preserves the optimized logic from the original job:
+    - first calculate raw aggregate values;
+    - then round final output columns;
+    - calculate tips_share_from_revenue from raw aggregated sums;
+    - protect against division by zero.
+
+    The function does not read or write data, so it can be tested with a small
+    in-memory Spark DataFrame.
+    """
+
+    enriched_df = silver_df.withColumn(
+        "payment_type_name",
+        when(col("payment_type") == 1, lit("Credit card"))
+        .when(col("payment_type") == 2, lit("Cash"))
+        .when(col("payment_type") == 3, lit("No charge"))
+        .when(col("payment_type") == 4, lit("Dispute"))
+        .when(col("payment_type") == 5, lit("Unknown"))
+        .when(col("payment_type") == 6, lit("Voided trip"))
+        .otherwise(lit("Other")),
+    )
+
+    aggregated_df = (
+        enriched_df
+        .groupBy("pickup_date", "trip_type", "payment_type", "payment_type_name")
+        .agg(
+            count("*").alias("trips_count"),
+            sum("total_amount").alias("total_revenue_raw"),
+            avg("total_amount").alias("avg_check_raw"),
+            sum("tip_amount").alias("total_tips_raw"),
+            avg("tip_amount").alias("avg_tip_raw"),
+        )
+    )
+
+    return (
+        aggregated_df
+        .withColumn("total_revenue", round(col("total_revenue_raw"), 2))
+        .withColumn("avg_check", round(col("avg_check_raw"), 2))
+        .withColumn("total_tips", round(col("total_tips_raw"), 2))
+        .withColumn("avg_tip", round(col("avg_tip_raw"), 2))
+        .withColumn(
+            "tips_share_from_revenue",
+            when(
+                col("total_revenue_raw") != 0,
+                round(col("total_tips_raw") / col("total_revenue_raw"), 4),
+            ).otherwise(lit(0.0)),
+        )
+        .withColumn("year", col("pickup_date").substr(1, 4))
+        .withColumn("month", col("pickup_date").substr(6, 2))
+        .withColumn("gold_load_timestamp", current_timestamp())
+        .select(
+            "pickup_date",
+            "trip_type",
+            "payment_type",
+            "payment_type_name",
+            "trips_count",
+            "total_revenue",
+            "avg_check",
+            "total_tips",
+            "avg_tip",
+            "tips_share_from_revenue",
+            "year",
+            "month",
+            "gold_load_timestamp",
+        )
+    )
+
+
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
@@ -135,67 +213,8 @@ def main(year: str, month: str) -> None:
         #
         # Это небольшая transformation, она lazy:
         # физически Spark ничего не считает здесь до action write().
-        enriched_df = silver_df.withColumn(
-            "payment_type_name",
-            when(col("payment_type") == 1, lit("Credit card"))
-            .when(col("payment_type") == 2, lit("Cash"))
-            .when(col("payment_type") == 3, lit("No charge"))
-            .when(col("payment_type") == 4, lit("Dispute"))
-            .when(col("payment_type") == 5, lit("Unknown"))
-            .when(col("payment_type") == 6, lit("Voided trip"))
-            .otherwise(lit("Other")),
-        )
 
-        # Сначала считаем raw aggregate values.
-        #
-        # Почему не округляем всё сразу:
-        # - total_revenue_raw и total_tips_raw нужны для tips_share_from_revenue;
-        # - если сначала округлить суммы, ratio будет считаться менее точно;
-        # - после расчёта ratio мы выберем только финальные округлённые колонки.
-        aggregated_df = (
-            enriched_df
-            .groupBy("pickup_date", "trip_type", "payment_type", "payment_type_name")
-            .agg(
-                count("*").alias("trips_count"),
-                sum("total_amount").alias("total_revenue_raw"),
-                avg("total_amount").alias("avg_check_raw"),
-                sum("tip_amount").alias("total_tips_raw"),
-                avg("tip_amount").alias("avg_tip_raw"),
-            )
-        )
-
-        gold_df = (
-            aggregated_df
-            .withColumn("total_revenue", round(col("total_revenue_raw"), 2))
-            .withColumn("avg_check", round(col("avg_check_raw"), 2))
-            .withColumn("total_tips", round(col("total_tips_raw"), 2))
-            .withColumn("avg_tip", round(col("avg_tip_raw"), 2))
-            .withColumn(
-                "tips_share_from_revenue",
-                when(
-                    col("total_revenue_raw") != 0,
-                    round(col("total_tips_raw") / col("total_revenue_raw"), 4),
-                ).otherwise(lit(0.0)),
-            )
-            .withColumn("year", col("pickup_date").substr(1, 4))
-            .withColumn("month", col("pickup_date").substr(6, 2))
-            .withColumn("gold_load_timestamp", current_timestamp())
-            .select(
-                "pickup_date",
-                "trip_type",
-                "payment_type",
-                "payment_type_name",
-                "trips_count",
-                "total_revenue",
-                "avg_check",
-                "total_tips",
-                "avg_tip",
-                "tips_share_from_revenue",
-                "year",
-                "month",
-                "gold_load_timestamp",
-            )
-        )
+        gold_df = build_gold_payment_type_stats(silver_df)
 
         # ВАЖНО:
         # Не делаем gold_df.show().

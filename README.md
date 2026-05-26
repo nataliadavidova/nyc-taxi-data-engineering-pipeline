@@ -32,7 +32,7 @@ This project demonstrates core data engineering practices:
 - Built a Superset BI dashboard for executive reporting, demand analysis, payment behavior, geospatial demand patterns, and ridesharing opportunity analysis.
 - Added data quality checks for Silver, Gold Object Storage, and ClickHouse layers to prevent invalid data from reaching BI reports.
 - Added geospatial enrichment using taxi zone centroid coordinates for pickup and dropoff demand maps.
-- Added automated tests and GitHub Actions CI to validate configuration helpers, DAG imports, and Airflow task dependencies.
+- Added automated tests and GitHub Actions CI to validate configuration helpers, DAG imports, Airflow task dependencies, Spark transformation logic, and quality gates.
 - Optimized Spark, Object Storage, quality-check, and ClickHouse load jobs by reducing redundant actions, repeated scans, and unnecessary sorting while keeping pipeline logic unchanged.
 
 ## Business Value
@@ -122,7 +122,15 @@ nyc_taxi_final_project/
 │   └── run_clickhouse_sql_file.py
 ├── tests/
 │   ├── test_config.py
-│   └── test_dag.py
+│   ├── test_dag.py
+│   ├── test_silver_transformations.py
+│   ├── test_gold_daily_transformations.py
+│   ├── test_gold_hourly_transformations.py
+│   ├── test_gold_payment_type_transformations.py
+│   ├── test_gold_location_pair_transformations.py
+│   ├── test_check_yellow_taxi_quality.py
+│   ├── test_check_gold_schema.py
+│   └── test_check_clickhouse_gold_quality.py
 ├── data/
 │   └── geo/
 │       └── taxi_zone_centroids.csv
@@ -751,13 +759,21 @@ The analytical summary also includes business recommendations related to zone-ba
 
 ## Automated Tests and CI
 
-The project includes automated tests for configuration helpers and Airflow DAG structure.
+The project includes automated tests for configuration helpers, Airflow DAG structure, Spark transformation logic, and data quality validation gates.
 
 Test files:
 
 ```text
 tests/test_config.py
 tests/test_dag.py
+tests/test_silver_transformations.py
+tests/test_gold_daily_transformations.py
+tests/test_gold_hourly_transformations.py
+tests/test_gold_payment_type_transformations.py
+tests/test_gold_location_pair_transformations.py
+tests/test_check_yellow_taxi_quality.py
+tests/test_check_gold_schema.py
+tests/test_check_clickhouse_gold_quality.py
 ```
 
 ### `test_config.py`
@@ -785,10 +801,55 @@ This test module validates Airflow orchestration logic:
 - gold Object Storage quality check runs after all monthly gold marts and before ClickHouse load tasks;
 - final ClickHouse gold quality check runs after all December load tasks.
 
+### Spark Transformation Tests
+
+The transformation tests validate business logic using small in-memory Spark DataFrames.
+
+Covered transformation modules:
+
+- `silver_yellow_taxi.py`;
+- `gold_daily_trips.py`;
+- `gold_hourly_trips.py`;
+- `gold_payment_type_stats.py`;
+- `gold_location_pair_stats.py`.
+
+The tests validate:
+
+- Silver DQ flags;
+- bad record condition logic;
+- Silver analytical columns such as `pickup_date`, `pickup_hour`, `pickup_month`, and `trip_type`;
+- daily Gold mart aggregations;
+- hourly Gold mart aggregations;
+- payment type mapping and payment metrics;
+- pickup/dropoff route-level aggregations;
+- taxi zone lookup enrichment.
+
+### Quality Gate Tests
+
+The quality gate tests validate driver-side and Spark-expression validation logic without requiring real S3 or ClickHouse access.
+
+Covered quality modules:
+
+- `check_yellow_taxi_quality.py`;
+- `check_gold_schema.py`;
+- `check_clickhouse_gold_quality.py`.
+
+The tests validate:
+
+- Silver row count and row-loss checks;
+- required Silver fields not being NULL;
+- invalid payment types, location IDs, pickup hours, and distances;
+- Gold Object Storage schema and quality checks;
+- ClickHouse final serving-layer validation logic;
+- SQL query construction for ClickHouse quality checks;
+- JSON result parsing and validation for ClickHouse quality metrics.
+
+### Running Tests
+
 Run tests locally:
 
 ```bash
-python -m pytest tests -v
+PYTHONPATH=jobs python -m pytest tests -v
 ```
 
 Run tests inside the Airflow container:
@@ -814,7 +875,9 @@ The CI pipeline runs:
 
 - Python syntax check for DAG and job files;
 - automated tests with `pytest`;
-- Airflow DAG structure tests.
+- Airflow DAG structure tests;
+- Spark transformation unit tests;
+- Silver, Gold, and ClickHouse quality-gate unit tests.
 
 CI command:
 
@@ -822,7 +885,8 @@ CI command:
 PYTHONPATH=jobs python -m pytest tests -v
 ```
 
-This helps ensure that changes do not break configuration helpers, Airflow DAG imports, or task dependencies before they are merged into `main`.
+This helps ensure that changes do not break configuration helpers, Airflow DAG imports, task dependencies, transformation logic, or quality validation gates before they are merged into `main`.
+
 
 ## Pipeline Optimization
 
@@ -979,11 +1043,13 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
-- export and version Superset dashboard configuration;
-- add taxi zone polygon-based choropleth maps instead of centroid-based point maps;
-- add pipeline monitoring and alerting for failures, long-running Airflow tasks, and Spark job duration anomalies;
-- review and further optimize Spark jobs to reduce repeated actions, repeated Object Storage reads, and long-running monthly tasks;
-- add Spark transformation unit tests with small sample datasets;
-- add incremental processing by month or partition;
+- add incremental processing by month or partition instead of full-year truncate/reload;
 - add ClickHouse schema migration/versioning approach;
-- add dbt layer for analytical transformations.
+- move shared ClickHouse HTTP helpers into a reusable `clickhouse_utils.py` module during the schema migration/versioning phase;
+- add dbt layer for analytical transformations or document dbt as a future analytical modeling layer;
+- verify Superset dashboard import on a clean Superset instance as a reproducible BI artifact;
+- add Airflow failure callbacks and external notifications, such as Telegram or Slack alerts;
+- add runtime trend monitoring for Airflow tasks and Spark jobs;
+- add Prometheus, Grafana, and Alertmanager for infrastructure and pipeline observability if the project is deployed as a longer-running environment;
+- add taxi zone polygon-based choropleth maps instead of centroid-based point maps;
+- add a final project walkthrough document for portfolio and interview preparation.

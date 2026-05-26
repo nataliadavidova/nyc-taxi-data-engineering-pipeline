@@ -39,8 +39,10 @@ Data Quality check for NYC Taxi pipeline.
 """
 
 import argparse
+from typing import List
 
 from pyspark.sql import SparkSession
+from pyspark.sql.column import Column
 from pyspark.sql.functions import (
     col,
     count as spark_count,
@@ -62,6 +64,18 @@ from config import (
 
 
 VALID_PAYMENT_TYPES = [0, 1, 2, 3, 4, 5, 6]
+
+REQUIRED_NOT_NULL_COLUMNS = [
+    "tpep_pickup_datetime",
+    "tpep_dropoff_datetime",
+    "pickup_date",
+    "pickup_hour",
+    "PULocationID",
+    "DOLocationID",
+    "payment_type",
+    "trip_distance",
+    "total_amount",
+]
 
 
 def create_spark_session() -> SparkSession:
@@ -92,6 +106,189 @@ def create_spark_session() -> SparkSession:
     )
 
 
+def build_silver_quality_expressions(
+    month_start: str,
+    next_month_start: str,
+    required_not_null_columns: List[str] = REQUIRED_NOT_NULL_COLUMNS,
+) -> List[Column]:
+    """
+    Build aggregate expressions for Silver quality checks.
+
+    Main optimization:
+    instead of running many silver_df.filter(...).count() actions, all Silver
+    checks are calculated with one silver_df.agg(...).collect() action.
+
+    This function only builds Spark expressions. It does not trigger execution.
+    """
+
+    null_check_expressions = [
+        spark_sum(
+            when(col(column_name).isNull(), 1).otherwise(0)
+        )
+        .cast("long")
+        .alias(f"null_{column_name}")
+        for column_name in required_not_null_columns
+    ]
+
+    return [
+        spark_count("*").cast("long").alias("silver_count"),
+        spark_sum(
+            when(
+                (col("pickup_date") < lit(month_start).cast("date"))
+                | (col("pickup_date") >= lit(next_month_start).cast("date")),
+                1,
+            ).otherwise(0)
+        ).cast("long").alias("outside_month_count"),
+        spark_sum(
+            when(
+                col("payment_type").isNull()
+                | (~col("payment_type").isin(VALID_PAYMENT_TYPES)),
+                1,
+            ).otherwise(0)
+        ).cast("long").alias("invalid_payment_type_count"),
+        spark_sum(
+            when(col("PULocationID").isNull() | (col("PULocationID") <= 0), 1)
+            .otherwise(0)
+        ).cast("long").alias("invalid_pickup_location_count"),
+        spark_sum(
+            when(col("DOLocationID").isNull() | (col("DOLocationID") <= 0), 1)
+            .otherwise(0)
+        ).cast("long").alias("invalid_dropoff_location_count"),
+        spark_sum(
+            when(
+                col("pickup_hour").isNull()
+                | (col("pickup_hour") < 0)
+                | (col("pickup_hour") > 23),
+                1,
+            ).otherwise(0)
+        ).cast("long").alias("invalid_pickup_hour_count"),
+        spark_sum(
+            when(col("trip_distance") <= 0, 1).otherwise(0)
+        ).cast("long").alias("invalid_distance_count"),
+        spark_sum(
+            when(col("total_amount") <= 0, 1).otherwise(0)
+        ).cast("long").alias("invalid_amount_count"),
+        *null_check_expressions,
+    ]
+
+
+def validate_silver_quality_counts(
+    bronze_count: int,
+    silver_quality_counts,
+    month_start: str,
+    next_month_start: str,
+    required_not_null_columns: List[str] = REQUIRED_NOT_NULL_COLUMNS,
+) -> None:
+    """
+    Validate aggregated Silver quality check results.
+
+    silver_quality_counts is a single Row collected from Spark.
+    All checks in this function are driver-side checks and do not trigger
+    additional Spark actions.
+    """
+
+    print(f"Bronze rows: {bronze_count}")
+
+    if bronze_count == 0:
+        raise ValueError("DQ FAILED: Bronze layer is empty")
+
+    silver_count = int(silver_quality_counts["silver_count"])
+    outside_month_count = int(silver_quality_counts["outside_month_count"])
+    invalid_payment_type_count = int(
+        silver_quality_counts["invalid_payment_type_count"]
+    )
+    invalid_pickup_location_count = int(
+        silver_quality_counts["invalid_pickup_location_count"]
+    )
+    invalid_dropoff_location_count = int(
+        silver_quality_counts["invalid_dropoff_location_count"]
+    )
+    invalid_pickup_hour_count = int(
+        silver_quality_counts["invalid_pickup_hour_count"]
+    )
+    invalid_distance_count = int(silver_quality_counts["invalid_distance_count"])
+    invalid_amount_count = int(silver_quality_counts["invalid_amount_count"])
+
+    print(f"Silver rows: {silver_count}")
+    print(f"Silver rows outside expected month: {outside_month_count}")
+
+    if silver_count == 0:
+        raise ValueError("DQ FAILED: Silver layer is empty")
+
+    min_expected_silver_rows = bronze_count * 0.7
+
+    if silver_count < min_expected_silver_rows:
+        raise ValueError(
+            f"DQ FAILED: Too many rows were removed. "
+            f"Bronze={bronze_count}, Silver={silver_count}"
+        )
+
+    if outside_month_count > 0:
+        raise ValueError(
+            f"Silver contains {outside_month_count} rows outside "
+            f"expected pickup date range [{month_start}, {next_month_start})"
+        )
+
+    for column_name in required_not_null_columns:
+        null_count = int(silver_quality_counts[f"null_{column_name}"])
+        print(f"NULL count in {column_name}: {null_count}")
+
+        if null_count > 0:
+            raise ValueError(
+                f"DQ FAILED: Column {column_name} contains NULL values"
+            )
+
+    print(f"Invalid payment_type count: {invalid_payment_type_count}")
+
+    if invalid_payment_type_count > 0:
+        raise ValueError(
+            f"DQ FAILED: invalid payment_type found: "
+            f"{invalid_payment_type_count}"
+        )
+
+    print(f"Invalid PULocationID count: {invalid_pickup_location_count}")
+
+    if invalid_pickup_location_count > 0:
+        raise ValueError(
+            f"DQ FAILED: invalid PULocationID found: "
+            f"{invalid_pickup_location_count}"
+        )
+
+    print(f"Invalid DOLocationID count: {invalid_dropoff_location_count}")
+
+    if invalid_dropoff_location_count > 0:
+        raise ValueError(
+            f"DQ FAILED: invalid DOLocationID found: "
+            f"{invalid_dropoff_location_count}"
+        )
+
+    print(f"Invalid pickup_hour count: {invalid_pickup_hour_count}")
+
+    if invalid_pickup_hour_count > 0:
+        raise ValueError(
+            f"DQ FAILED: invalid pickup_hour found: "
+            f"{invalid_pickup_hour_count}"
+        )
+
+    print(f"Invalid trip_distance count: {invalid_distance_count}")
+
+    if invalid_distance_count > 0:
+        raise ValueError(
+            f"DQ FAILED: trip_distance <= 0 found: {invalid_distance_count}"
+        )
+
+    print(f"Invalid total_amount count: {invalid_amount_count}")
+
+    if invalid_amount_count > 0:
+        print(
+            f"DQ WARNING: total_amount <= 0 found: {invalid_amount_count}. "
+            "These rows are allowed because NYC Taxi data may contain refunds, "
+            "cancellations, or fare corrections."
+        )
+
+    print("DQ PASSED: Silver data quality checks completed successfully")
+
+
 def main(year_arg: str, month_arg: str) -> None:
     spark = create_spark_session()
 
@@ -111,226 +308,33 @@ def main(year_arg: str, month_arg: str) -> None:
         # BRONZE ROW COUNT
         # ======================
 
-        # Это отдельный action по bronze_df.
+        # This is a separate action on bronze_df.
         #
-        # Почему оставляем:
-        # - Bronze и Silver — разные parquet datasets;
-        # - для проверки потери строк нам нужен bronze_count;
-        # - этот count() нельзя объединить с aggregate по silver_df.
+        # Why we keep it:
+        # - Bronze and Silver are different parquet datasets;
+        # - row-loss validation requires bronze_count;
+        # - this count() cannot be merged with the aggregate over silver_df.
         bronze_count = bronze_df.count()
-
-        print(f"Bronze rows: {bronze_count}")
-
-        if bronze_count == 0:
-            raise ValueError("DQ FAILED: Bronze layer is empty")
 
         # ======================
         # SILVER QUALITY CHECKS
         # ======================
 
-        required_not_null_columns = [
-            "tpep_pickup_datetime",
-            "tpep_dropoff_datetime",
-            "pickup_date",
-            "pickup_hour",
-            "PULocationID",
-            "DOLocationID",
-            "payment_type",
-            "trip_distance",
-            "total_amount",
-        ]
-
-        # Раньше по каждой колонке был отдельный count():
-        #
-        # for column_name in required_not_null_columns:
-        #     null_count = silver_df.filter(col(column_name).isNull()).count()
-        #
-        # Это плохо для Spark + Object Storage, потому что каждый count()
-        # заставляет Spark заново читать/сканировать silver parquet.
-        #
-        # Теперь создаём список aggregate expressions и считаем все NULL counts
-        # в одном silver_df.agg(...).
-        null_check_expressions = [
-            spark_sum(
-                when(col(column_name).isNull(), 1).otherwise(0)
-            )
-            .cast("long")
-            .alias(f"null_{column_name}")
-            for column_name in required_not_null_columns
-        ]
-
-        # Все остальные проверки Silver тоже добавляем в тот же aggregate.
-        #
-        # Итого один action по silver_df считает:
-        # - silver_count;
-        # - rows outside expected month;
-        # - invalid payment_type;
-        # - invalid pickup/dropoff location;
-        # - invalid pickup_hour;
-        # - invalid trip_distance;
-        # - warning count for total_amount <= 0;
-        # - null counts по всем required columns.
-        silver_quality_counts = silver_df.agg(
-            spark_count("*").cast("long").alias("silver_count"),
-            spark_sum(
-                when(
-                    (col("pickup_date") < lit(month_start).cast("date"))
-                    | (col("pickup_date") >= lit(next_month_start).cast("date")),
-                    1,
-                ).otherwise(0)
-            ).cast("long").alias("outside_month_count"),
-            spark_sum(
-                when(
-                    col("payment_type").isNull()
-                    | (~col("payment_type").isin(VALID_PAYMENT_TYPES)),
-                    1,
-                ).otherwise(0)
-            ).cast("long").alias("invalid_payment_type_count"),
-            spark_sum(
-                when(col("PULocationID").isNull() | (col("PULocationID") <= 0), 1)
-                .otherwise(0)
-            ).cast("long").alias("invalid_pickup_location_count"),
-            spark_sum(
-                when(col("DOLocationID").isNull() | (col("DOLocationID") <= 0), 1)
-                .otherwise(0)
-            ).cast("long").alias("invalid_dropoff_location_count"),
-            spark_sum(
-                when(
-                    col("pickup_hour").isNull()
-                    | (col("pickup_hour") < 0)
-                    | (col("pickup_hour") > 23),
-                    1,
-                ).otherwise(0)
-            ).cast("long").alias("invalid_pickup_hour_count"),
-            spark_sum(
-                when(col("trip_distance") <= 0, 1).otherwise(0)
-            ).cast("long").alias("invalid_distance_count"),
-            spark_sum(
-                when(col("total_amount") <= 0, 1).otherwise(0)
-            ).cast("long").alias("invalid_amount_count"),
-            *null_check_expressions,
-        ).collect()[0]
-
-        # Достаём значения из одного результата aggregate.
-        # Здесь уже нет новых Spark actions: это работа с маленьким Row object в driver.
-        silver_count = int(silver_quality_counts["silver_count"])
-        outside_month_count = int(silver_quality_counts["outside_month_count"])
-        invalid_payment_type_count = int(
-            silver_quality_counts["invalid_payment_type_count"]
+        # Build all Silver quality expressions and run one aggregate action.
+        quality_expressions = build_silver_quality_expressions(
+            month_start=month_start,
+            next_month_start=next_month_start,
         )
-        invalid_pickup_location_count = int(
-            silver_quality_counts["invalid_pickup_location_count"]
+
+        silver_quality_counts = silver_df.agg(*quality_expressions).collect()[0]
+
+        validate_silver_quality_counts(
+            bronze_count=bronze_count,
+            silver_quality_counts=silver_quality_counts,
+            month_start=month_start,
+            next_month_start=next_month_start,
         )
-        invalid_dropoff_location_count = int(
-            silver_quality_counts["invalid_dropoff_location_count"]
-        )
-        invalid_pickup_hour_count = int(
-            silver_quality_counts["invalid_pickup_hour_count"]
-        )
-        invalid_distance_count = int(silver_quality_counts["invalid_distance_count"])
-        invalid_amount_count = int(silver_quality_counts["invalid_amount_count"])
 
-        print(f"Silver rows: {silver_count}")
-        print(f"Silver rows outside expected month: {outside_month_count}")
-
-        if silver_count == 0:
-            raise ValueError("DQ FAILED: Silver layer is empty")
-
-        # ======================
-        # ROW LOSS CHECK
-        # ======================
-
-        # Проверяем, что Silver не потерял слишком много строк относительно Bronze.
-        #
-        # Порог 70% означает:
-        # - часть строк может уйти в bad records;
-        # - но если Silver меньше 70% от Bronze, это подозрительно;
-        # - тогда job падает, чтобы не пропустить плохой слой дальше в Gold.
-        min_expected_silver_rows = bronze_count * 0.7
-
-        if silver_count < min_expected_silver_rows:
-            raise ValueError(
-                f"DQ FAILED: Too many rows were removed. "
-                f"Bronze={bronze_count}, Silver={silver_count}"
-            )
-
-        # ======================
-        # VALIDATION FAILURES
-        # ======================
-
-        if outside_month_count > 0:
-            raise ValueError(
-                f"Silver contains {outside_month_count} rows outside "
-                f"expected pickup date range [{month_start}, {next_month_start})"
-            )
-
-        # Печатаем NULL counts по всем required columns.
-        # Все значения уже были посчитаны в одном aggregate выше.
-        for column_name in required_not_null_columns:
-            null_count = int(silver_quality_counts[f"null_{column_name}"])
-            print(f"NULL count in {column_name}: {null_count}")
-
-            if null_count > 0:
-                raise ValueError(
-                    f"DQ FAILED: Column {column_name} contains NULL values"
-                )
-
-        print(f"Invalid payment_type count: {invalid_payment_type_count}")
-
-        if invalid_payment_type_count > 0:
-            raise ValueError(
-                f"DQ FAILED: invalid payment_type found: "
-                f"{invalid_payment_type_count}"
-            )
-
-        print(f"Invalid PULocationID count: {invalid_pickup_location_count}")
-
-        if invalid_pickup_location_count > 0:
-            raise ValueError(
-                f"DQ FAILED: invalid PULocationID found: "
-                f"{invalid_pickup_location_count}"
-            )
-
-        print(f"Invalid DOLocationID count: {invalid_dropoff_location_count}")
-
-        if invalid_dropoff_location_count > 0:
-            raise ValueError(
-                f"DQ FAILED: invalid DOLocationID found: "
-                f"{invalid_dropoff_location_count}"
-            )
-
-        print(f"Invalid pickup_hour count: {invalid_pickup_hour_count}")
-
-        if invalid_pickup_hour_count > 0:
-            raise ValueError(
-                f"DQ FAILED: invalid pickup_hour found: "
-                f"{invalid_pickup_hour_count}"
-            )
-
-        print(f"Invalid trip_distance count: {invalid_distance_count}")
-
-        if invalid_distance_count > 0:
-            raise ValueError(
-                f"DQ FAILED: trip_distance <= 0 found: {invalid_distance_count}"
-            )
-
-        print(f"Invalid total_amount count: {invalid_amount_count}")
-
-        # Для total_amount <= 0 оставляем WARNING, а не failure.
-        #
-        # Почему:
-        # - в NYC Taxi данных такие строки могут быть связаны с refunds,
-        #   cancellations или fare corrections;
-        # - в silver job мы уже запрещаем total_amount < 0;
-        # - здесь дополнительно предупреждаем о total_amount == 0.
-        if invalid_amount_count > 0:
-            print(
-                f"DQ WARNING: total_amount <= 0 found: {invalid_amount_count}. "
-                "These rows are allowed because NYC Taxi data may contain refunds, "
-                "cancellations, or fare corrections."
-            )
-
-        print("DQ PASSED: Silver data quality checks completed successfully")
 
     finally:
         # SparkSession закрываем всегда.

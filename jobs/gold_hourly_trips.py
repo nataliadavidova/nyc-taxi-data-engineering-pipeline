@@ -50,8 +50,8 @@ Gold job: hourly trips analytics.
 
 import argparse
 
-from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, col, count, current_timestamp, round, sum
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.functions import avg, col, count, current_timestamp, date_format, round, sum
 
 from config import (
     AWS_ACCESS_KEY_ID,
@@ -91,6 +91,35 @@ def create_spark_session() -> SparkSession:
     )
 
 
+def build_gold_hourly_trips(silver_df: DataFrame) -> DataFrame:
+    """
+    Build the hourly trips Gold mart from the Silver dataframe.
+
+    The output is aggregated by pickup_date, pickup_hour, and trip_type.
+
+    This function contains only transformation logic and can be tested with a
+    small in-memory Spark DataFrame without reading from or writing to Object
+    Storage.
+    """
+
+    return (
+        silver_df
+        .groupBy("pickup_date", "pickup_hour", "trip_type")
+        .agg(
+            count("*").alias("trips_count"),
+            round(sum("total_amount"), 2).alias("total_revenue"),
+            round(avg("total_amount"), 2).alias("avg_check"),
+            round(avg("trip_distance"), 2).alias("avg_trip_distance"),
+            round(avg("trip_duration_minutes"), 2).alias(
+                "avg_trip_duration_minutes"
+            ),
+        )
+        .withColumn("year", date_format(col("pickup_date"), "yyyy"))
+        .withColumn("month", date_format(col("pickup_date"), "MM"))
+        .withColumn("gold_load_timestamp", current_timestamp())
+    )
+
+
 def main(year: str, month: str) -> None:
     spark = create_spark_session()
 
@@ -113,22 +142,7 @@ def main(year: str, month: str) -> None:
         # Проверка, что Silver не пустой, уже выполняется в:
         # jobs/check_yellow_taxi_quality.py
 
-        gold_df = (
-            silver_df
-            .groupBy("pickup_date", "pickup_hour", "trip_type")
-            .agg(
-                count("*").alias("trips_count"),
-                round(sum("total_amount"), 2).alias("total_revenue"),
-                round(avg("total_amount"), 2).alias("avg_check"),
-                round(avg("trip_distance"), 2).alias("avg_trip_distance"),
-                round(avg("trip_duration_minutes"), 2).alias(
-                    "avg_trip_duration_minutes"
-                ),
-            )
-            .withColumn("year", col("pickup_date").substr(1, 4))
-            .withColumn("month", col("pickup_date").substr(6, 2))
-            .withColumn("gold_load_timestamp", current_timestamp())
-        )
+        gold_df = build_gold_hourly_trips(silver_df)
 
         # ВАЖНО:
         # Не делаем gold_df.show().
