@@ -20,7 +20,8 @@ This project demonstrates core data engineering practices:
 - BI visualization with Apache Superset;
 - Docker-based local infrastructure;
 - centralized configuration and reusable path helpers;
-- full-year historical data processing.
+- full-year historical data processing;
+- configured period refresh for safe month-level and interval reloads.
 
 ## Project Highlights
 
@@ -28,6 +29,8 @@ This project demonstrates core data engineering practices:
 - Implemented a medallion architecture with raw, bronze, silver, and gold data layers.
 - Developed PySpark ETL jobs for ingestion, cleaning, validation, feature derivation, and analytical mart creation.
 - Orchestrated the full pipeline with Apache Airflow, including monthly processing, dependency management, retries, and final quality gates.
+- Added a period refresh Airflow DAG for safe month-level and interval reloads without truncating the entire ClickHouse serving layer.
+- Implemented `replace_period` mode with ClickHouse month deletion, monthly Spark reprocessing, ClickHouse reload, and month-level serving-layer quality checks.
 - Loaded business-ready gold marts into ClickHouse as an analytical serving layer for fast BI queries.
 - Built a Superset BI dashboard for executive reporting, demand analysis, payment behavior, geospatial demand patterns, and ridesharing opportunity analysis.
 - Added data quality checks for Silver, Gold Object Storage, and ClickHouse layers to prevent invalid data from reaching BI reports.
@@ -100,9 +103,11 @@ nyc_taxi_final_project/
 │   └── workflows/
 │       └── ci.yml
 ├── dags/
-│   └── nyc_taxi_pipeline.py
+│   ├── nyc_taxi_pipeline.py
+│   └── nyc_taxi_period_refresh_pipeline.py
 ├── jobs/
 │   ├── config.py
+│   ├── period_utils.py
 │   ├── bronze_yellow_taxi.py
 │   ├── silver_yellow_taxi.py
 │   ├── check_yellow_taxi_quality.py
@@ -113,7 +118,9 @@ nyc_taxi_final_project/
 │   ├── check_gold_schema.py
 │   ├── create_clickhouse_gold_tables.py
 │   ├── truncate_clickhouse_gold_tables.py
+│   ├── delete_clickhouse_gold_month.py
 │   ├── check_clickhouse_gold_quality.py
+│   ├── check_clickhouse_gold_month_quality.py
 │   ├── load_gold_daily_trips_to_clickhouse.py
 │   ├── load_gold_hourly_trips_to_clickhouse.py
 │   ├── load_gold_location_pair_stats_to_clickhouse.py
@@ -123,6 +130,10 @@ nyc_taxi_final_project/
 ├── tests/
 │   ├── test_config.py
 │   ├── test_dag.py
+│   ├── test_period_utils.py
+│   ├── test_delete_clickhouse_gold_month.py
+│   ├── test_check_clickhouse_gold_month_quality.py
+│   ├── test_period_refresh_dag.py
 │   ├── test_silver_transformations.py
 │   ├── test_gold_daily_transformations.py
 │   ├── test_gold_hourly_transformations.py
@@ -266,6 +277,7 @@ The project includes data quality and validation jobs for different pipeline lay
 jobs/check_yellow_taxi_quality.py
 jobs/check_gold_schema.py
 jobs/check_clickhouse_gold_quality.py
+jobs/check_clickhouse_gold_month_quality.py
 ```
 
 ### Silver Data Quality Checks
@@ -327,6 +339,37 @@ It checks that:
 - `gold_payment_type_stats` has non-empty payment type names.
 
 This check acts as a final quality gate before the data is considered ready for BI reporting in Superset.
+
+### ClickHouse Month-Level Quality Checks
+
+The period refresh pipeline also includes a month-scoped ClickHouse quality check:
+
+```text
+jobs/check_clickhouse_gold_month_quality.py
+```
+
+This job validates the ClickHouse serving layer for one selected `year` and `month`.
+
+It is used by the period refresh DAG after a selected month has been deleted from ClickHouse, reprocessed through Spark, and loaded back into the gold serving tables.
+
+For a selected month, the check validates that:
+
+- all expected ClickHouse gold tables exist;
+- each gold table contains rows for the selected `year` and `month`;
+- `pickup_date` values belong to the selected calendar month;
+- `trips_count` values are positive;
+- `trip_type` values are populated for hourly, route, and payment tables;
+- `pickup_hour` values are valid for `gold_hourly_trips`;
+- `gold_location_pair_stats` has non-empty pickup and dropoff zone names;
+- `gold_payment_type_stats` has non-empty payment type names.
+
+For example, for May 2024 the expected date range is:
+
+```text
+2024-05-01 <= pickup_date < 2024-06-01
+```
+
+This month-level check makes safe reloads possible without requiring a full-year ClickHouse validation after every monthly replacement.
 
 ## Gold Marts
 
@@ -476,13 +519,39 @@ The `create_clickhouse_gold_tables.py` job creates the ClickHouse database and g
 
 The `truncate_clickhouse_gold_tables.py` job clears existing gold table data before a full reload. This prevents duplicate data in ClickHouse when the full-year pipeline is rerun.
 
-After all monthly gold marts are loaded into ClickHouse, the DAG runs a final quality check:
+For safe month-level or interval refreshes, the project also includes:
+
+```text
+jobs/delete_clickhouse_gold_month.py
+jobs/check_clickhouse_gold_month_quality.py
+```
+
+The `delete_clickhouse_gold_month.py` job deletes existing rows for a selected `year` and `month` from all ClickHouse gold tables before the month is reloaded.
+
+This supports the `replace_period` refresh mode:
+
+```text
+delete selected month from ClickHouse
+        │
+        ▼
+rebuild bronze, silver, and gold data for the month
+        │
+        ▼
+load rebuilt gold marts to ClickHouse
+        │
+        ▼
+validate the selected month in ClickHouse
+```
+
+This approach avoids truncating the entire serving layer when only one month or a small interval needs to be reprocessed.
+
+In the full-year pipeline DAG, after all monthly gold marts are loaded into ClickHouse, the DAG runs a final full-year quality check:
 
 ```text
 jobs/check_clickhouse_gold_quality.py
 ```
 
-This job validates that the ClickHouse serving layer is ready for BI usage:
+This job validates that the ClickHouse serving layer is ready for BI usage after the full-year reload:
 
 - all gold tables exist;
 - all gold tables are not empty;
@@ -490,6 +559,8 @@ This job validates that the ClickHouse serving layer is ready for BI usage:
 - `trip_type` values are populated in hourly, route, and payment tables;
 - enriched pickup and dropoff location names are populated;
 - payment type names are populated.
+
+For period refresh runs, ClickHouse validation is performed by the month-level quality check after each selected month is reloaded.
 
 If any of these checks fail, the Airflow DAG fails as well.
 
@@ -531,13 +602,22 @@ The `gold_location_pair_stats` mart is enriched with readable taxi zone names, f
 
 The pipeline is orchestrated with Apache Airflow.
 
-DAG file:
+The project currently includes two Airflow DAGs:
 
 ```text
 dags/nyc_taxi_pipeline.py
+dags/nyc_taxi_period_refresh_pipeline.py
 ```
 
-The DAG processes all months of 2024 and runs the full pipeline:
+### Full-Year Pipeline DAG
+
+The main full-year pipeline DAG is:
+
+```text
+nyc_taxi_pipeline
+```
+
+This DAG processes all months of 2024 and runs the full pipeline:
 
 ```text
 create ClickHouse gold tables
@@ -566,7 +646,6 @@ load gold marts to ClickHouse
         ▼
 check ClickHouse gold quality
 ```
-Airflow is used to manage task dependencies, retries, and execution visibility.
 
 The DAG first ensures that all ClickHouse gold tables exist, then truncates them before running the full-year reload.
 
@@ -574,6 +653,87 @@ For each month, the DAG validates gold parquet marts in Object Storage before lo
 
 The final `check_clickhouse_gold_quality` task verifies that the ClickHouse serving layer is complete and ready for Superset reporting.
 
+### Period Refresh DAG
+
+The project also includes a period-based refresh DAG:
+
+```text
+nyc_taxi_period_refresh_pipeline
+```
+
+This DAG is designed for safe month-level and interval reloads.
+
+Current supported refresh mode:
+
+```text
+replace_period
+```
+
+In `replace_period` mode, the DAG processes a configured interval of months sequentially. For each selected month, it:
+
+```text
+delete selected month from ClickHouse
+        │
+        ▼
+run bronze monthly job
+        │
+        ▼
+run silver monthly job
+        │
+        ▼
+run silver quality check
+        │
+        ▼
+build gold marts
+        │
+        ▼
+run gold Object Storage schema and quality check
+        │
+        ▼
+load gold marts to ClickHouse
+        │
+        ▼
+run ClickHouse month-level quality check
+```
+
+A one-month reload is handled as a period refresh where the start and end month are the same.
+
+Example:
+
+```python
+START_YEAR = "2024"
+START_MONTH = "05"
+END_YEAR = "2024"
+END_MONTH = "05"
+REFRESH_MODE = "replace_period"
+```
+
+This makes it possible to safely reload only May 2024 without truncating all ClickHouse gold tables.
+
+The same DAG can also refresh a multi-month interval, for example:
+
+```python
+START_YEAR = "2024"
+START_MONTH = "01"
+END_YEAR = "2024"
+END_MONTH = "02"
+REFRESH_MODE = "replace_period"
+```
+
+This sequentially reloads January and February 2024.
+
+The period refresh DAG has been manually tested in Airflow for:
+
+```text
+2024-01 → 2024-01
+2024-01 → 2024-02
+```
+
+Both test runs completed successfully in `replace_period` mode.
+
+Current implementation uses static period configuration inside the DAG file. Future improvements may move this configuration to Airflow Params or Trigger DAG config with validation and dynamic task mapping.
+
+Airflow is used to manage task dependencies, retries, and execution visibility.
 
 ## Superset BI Dashboard
 
@@ -765,7 +925,9 @@ Test files:
 
 ```text
 tests/test_config.py
+tests/test_period_utils.py
 tests/test_dag.py
+tests/test_period_refresh_dag.py
 tests/test_silver_transformations.py
 tests/test_gold_daily_transformations.py
 tests/test_gold_hourly_transformations.py
@@ -774,6 +936,8 @@ tests/test_gold_location_pair_transformations.py
 tests/test_check_yellow_taxi_quality.py
 tests/test_check_gold_schema.py
 tests/test_check_clickhouse_gold_quality.py
+tests/test_delete_clickhouse_gold_month.py
+tests/test_check_clickhouse_gold_month_quality.py
 ```
 
 ### `test_config.py`
@@ -800,6 +964,60 @@ This test module validates Airflow orchestration logic:
 - gold tasks run before ClickHouse load tasks;
 - gold Object Storage quality check runs after all monthly gold marts and before ClickHouse load tasks;
 - final ClickHouse gold quality check runs after all December load tasks.
+
+### `test_period_refresh_dag.py`
+
+This test module validates the period refresh Airflow DAG structure:
+
+- DAG imports without errors;
+- `nyc_taxi_period_refresh_pipeline` DAG exists;
+- `create_clickhouse_gold_tables` task exists;
+- full-rebuild-only tasks such as `truncate_clickhouse_gold_tables` are not used in `replace_period` mode;
+- monthly delete, processing, load, and quality-check tasks exist for the configured period;
+- total task count is correct for the configured full-year interval;
+- `create_clickhouse_gold_tables` runs before the first month delete task;
+- monthly processing starts only after the selected ClickHouse month is deleted;
+- monthly Spark processing dependencies are correct;
+- gold Object Storage schema check runs after all monthly gold marts;
+- ClickHouse load tasks run after the gold schema check;
+- ClickHouse month-level quality check runs after all ClickHouse load tasks;
+- months are processed sequentially.
+
+### `test_period_utils.py`
+
+This test module validates period helper logic:
+
+- generation of a one-month period;
+- generation of a same-year month interval;
+- generation of a cross-year month interval;
+- normalization of integer and string year/month values;
+- validation of invalid months;
+- validation that start period is not later than end period.
+
+### `test_delete_clickhouse_gold_month.py`
+
+This test module validates ClickHouse month deletion logic without requiring a real ClickHouse connection:
+
+- year/month normalization;
+- ClickHouse `ALTER TABLE ... DELETE` query construction;
+- month-level `count()` query construction;
+- parsing of ClickHouse count responses;
+- polling logic for asynchronous ClickHouse mutations;
+- execution flow across all configured gold tables.
+
+### `test_check_clickhouse_gold_month_quality.py`
+
+This test module validates month-level ClickHouse quality-check logic without requiring a real ClickHouse connection:
+
+- table existence query construction;
+- month-scoped quality query construction;
+- JSON response parsing;
+- common month metrics validation;
+- `trip_type` validation;
+- hourly pickup hour validation;
+- pickup/dropoff zone validation;
+- payment type name validation;
+- execution flow across all configured gold tables.
 
 ### Spark Transformation Tests
 
@@ -832,7 +1050,9 @@ Covered quality modules:
 
 - `check_yellow_taxi_quality.py`;
 - `check_gold_schema.py`;
-- `check_clickhouse_gold_quality.py`.
+- `check_clickhouse_gold_quality.py`;
+- `check_clickhouse_gold_month_quality.py`;
+- `delete_clickhouse_gold_month.py`.
 
 The tests validate:
 
@@ -842,7 +1062,10 @@ The tests validate:
 - Gold Object Storage schema and quality checks;
 - ClickHouse final serving-layer validation logic;
 - SQL query construction for ClickHouse quality checks;
-- JSON result parsing and validation for ClickHouse quality metrics.
+- JSON result parsing and validation for ClickHouse quality metrics;
+- ClickHouse month-level delete query construction;
+- ClickHouse month-level quality validation logic;
+- month-scoped serving-layer validation for safe period refreshes.
 
 ### Running Tests
 
@@ -961,11 +1184,47 @@ This starts:
 http://localhost:8080
 ```
 
-Run the DAG:
+Run the full-year pipeline DAG:
 
 ```text
 nyc_taxi_pipeline
 ```
+
+For safe month-level or interval refreshes, use the period refresh DAG:
+
+```text
+nyc_taxi_period_refresh_pipeline
+```
+
+Current period refresh configuration is defined inside the DAG file:
+
+```text
+dags/nyc_taxi_period_refresh_pipeline.py
+```
+
+Example one-month reload:
+
+```python
+START_YEAR = "2024"
+START_MONTH = "05"
+END_YEAR = "2024"
+END_MONTH = "05"
+REFRESH_MODE = "replace_period"
+```
+
+Example two-month interval refresh:
+
+```python
+START_YEAR = "2024"
+START_MONTH = "01"
+END_YEAR = "2024"
+END_MONTH = "02"
+REFRESH_MODE = "replace_period"
+```
+
+After changing the configured period, Airflow needs to re-parse the DAG file before the updated graph appears in the UI.
+
+The period refresh DAG should be used carefully because it deletes selected month data from ClickHouse before reloading it.
 
 ### 4. Open ClickHouse
 
@@ -1043,11 +1302,16 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
-- add incremental processing by month or partition instead of full-year truncate/reload;
+- move period refresh configuration from static DAG constants to Airflow Params or Trigger DAG config with validation;
+- add dynamic task mapping for production-like period refresh runs with runtime parameters;
+- add automatic raw file discovery for processing newly arrived monthly files;
+- add a protected `full_rebuild` mode to the period refresh DAG or keep it as a separate controlled full-year DAG;
 - add ClickHouse schema migration/versioning approach;
 - move shared ClickHouse HTTP helpers into a reusable `clickhouse_utils.py` module during the schema migration/versioning phase;
 - add dbt layer for analytical transformations or document dbt as a future analytical modeling layer;
 - verify Superset dashboard import on a clean Superset instance as a reproducible BI artifact;
+- migrate Spark compute to Yandex Data Proc or another cloud Spark runtime as a separate cloud execution phase;
+- decide whether ClickHouse should remain local for portfolio usage or move to a cloud-hosted serving layer;
 - add Airflow failure callbacks and external notifications, such as Telegram or Slack alerts;
 - add runtime trend monitoring for Airflow tasks and Spark jobs;
 - add Prometheus, Grafana, and Alertmanager for infrastructure and pipeline observability if the project is deployed as a longer-running environment;
