@@ -1,0 +1,193 @@
+import pytest
+
+import raw_discovery as discovery
+
+
+def test_normalize_period_accepts_string_values():
+    assert discovery.normalize_period("2024", "05") == ("2024", "05")
+
+
+def test_normalize_period_accepts_integer_values():
+    assert discovery.normalize_period(2024, 5) == ("2024", "05")
+
+
+def test_normalize_period_rejects_invalid_month():
+    with pytest.raises(ValueError, match="must be between 1 and 12"):
+        discovery.normalize_period("2024", "13")
+
+
+def test_parse_raw_yellow_key_parses_valid_key():
+    key = (
+        "nyc_taxi/raw/yellow/year=2024/month=05/"
+        "yellow_tripdata_2024-05.parquet"
+    )
+
+    assert discovery.parse_raw_yellow_key(key) == ("2024", "05")
+
+
+def test_parse_raw_yellow_key_rejects_wrong_taxi_type():
+    key = (
+        "nyc_taxi/raw/green/year=2024/month=05/"
+        "green_tripdata_2024-05.parquet"
+    )
+
+    assert discovery.parse_raw_yellow_key(key) is None
+
+
+def test_parse_raw_yellow_key_rejects_wrong_layer():
+    key = (
+        "nyc_taxi/bronze/yellow/year=2024/month=05/"
+        "yellow_tripdata_2024-05.parquet"
+    )
+
+    assert discovery.parse_raw_yellow_key(key) is None
+
+
+def test_parse_raw_yellow_key_rejects_mismatched_filename_period():
+    key = (
+        "nyc_taxi/raw/yellow/year=2024/month=05/"
+        "yellow_tripdata_2024-06.parquet"
+    )
+
+    assert discovery.parse_raw_yellow_key(key) is None
+
+
+def test_parse_raw_yellow_key_rejects_invalid_month():
+    key = (
+        "nyc_taxi/raw/yellow/year=2024/month=13/"
+        "yellow_tripdata_2024-13.parquet"
+    )
+
+    assert discovery.parse_raw_yellow_key(key) is None
+
+
+def test_parse_raw_yellow_key_rejects_unrelated_key():
+    key = "nyc_taxi/raw/lookup/taxi_zone_lookup.csv"
+
+    assert discovery.parse_raw_yellow_key(key) is None
+
+
+def test_discover_raw_yellow_periods_from_keys_filters_deduplicates_and_sorts():
+    keys = [
+        "nyc_taxi/raw/yellow/year=2024/month=02/yellow_tripdata_2024-02.parquet",
+        "nyc_taxi/raw/yellow/year=2024/month=01/yellow_tripdata_2024-01.parquet",
+        "nyc_taxi/raw/yellow/year=2024/month=02/yellow_tripdata_2024-02.parquet",
+        "nyc_taxi/raw/lookup/taxi_zone_lookup.csv",
+        "nyc_taxi/raw/green/year=2024/month=01/green_tripdata_2024-01.parquet",
+    ]
+
+    assert discovery.discover_raw_yellow_periods_from_keys(keys) == [
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+
+
+def test_find_new_periods_returns_raw_minus_processed():
+    raw_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2025", "01"),
+    ]
+    processed_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+
+    assert discovery.find_new_periods(raw_periods, processed_periods) == [
+        ("2025", "01")
+    ]
+
+
+def test_find_new_periods_sorts_result_chronologically():
+    raw_periods = [
+        ("2025", "02"),
+        ("2024", "12"),
+        ("2025", "01"),
+    ]
+    processed_periods = []
+
+    assert discovery.find_new_periods(raw_periods, processed_periods) == [
+        ("2024", "12"),
+        ("2025", "01"),
+        ("2025", "02"),
+    ]
+
+
+def test_find_new_periods_handles_all_periods_processed():
+    raw_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+    processed_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+
+    assert discovery.find_new_periods(raw_periods, processed_periods) == []
+
+
+def test_find_new_periods_handles_empty_raw_periods():
+    assert discovery.find_new_periods([], [("2024", "01")]) == []
+
+
+def test_get_raw_yellow_prefix():
+    assert discovery.get_raw_yellow_prefix() == "nyc_taxi/raw/yellow/"
+
+
+def test_build_processed_periods_query():
+    query = discovery.build_processed_periods_query()
+
+    assert "SELECT DISTINCT" in query
+    assert "year" in query
+    assert "month" in query
+    assert "FROM nyc_taxi.gold_daily_trips" in query
+    assert "FORMAT JSON" in query
+
+
+def test_list_processed_clickhouse_periods(monkeypatch):
+    monkeypatch.setattr(
+        discovery,
+        "fetch_json_data",
+        lambda query: [
+            {"year": "2024", "month": "02"},
+            {"year": "2024", "month": "01"},
+            {"year": "2024", "month": "01"},
+        ],
+    )
+
+    assert discovery.list_processed_clickhouse_periods() == [
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+
+
+def test_discover_new_raw_periods(monkeypatch):
+    monkeypatch.setattr(
+        discovery,
+        "list_raw_yellow_periods",
+        lambda: [
+            ("2024", "01"),
+            ("2024", "02"),
+            ("2025", "01"),
+        ],
+    )
+    monkeypatch.setattr(
+        discovery,
+        "list_processed_clickhouse_periods",
+        lambda: [
+            ("2024", "01"),
+            ("2024", "02"),
+        ],
+    )
+
+    assert discovery.discover_new_raw_periods() == [("2025", "01")]
+
+
+def test_format_periods():
+    assert discovery.format_periods([("2024", "01"), ("2024", "02")]) == (
+        "2024-01, 2024-02"
+    )
+
+
+def test_format_periods_handles_empty_list():
+    assert discovery.format_periods([]) == "none"
