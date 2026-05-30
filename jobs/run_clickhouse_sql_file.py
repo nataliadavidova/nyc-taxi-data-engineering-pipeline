@@ -12,7 +12,7 @@ import argparse
 import re
 from pathlib import Path
 
-from truncate_clickhouse_gold_tables import execute_clickhouse_query
+from clickhouse_utils import execute_clickhouse_query
 
 
 DEFAULT_OUTPUT_FORMAT = "TabSeparatedWithNames"

@@ -19,7 +19,7 @@ This project demonstrates core data engineering practices:
 - analytical storage with ClickHouse;
 - BI visualization with Apache Superset;
 - Docker-based local infrastructure;
-- centralized configuration and reusable path helpers;
+- centralized configuration, reusable path helpers, and shared ClickHouse HTTP utilities;
 - full-year historical data processing;
 - configured period refresh for safe month-level and interval reloads.
 
@@ -31,6 +31,7 @@ This project demonstrates core data engineering practices:
 - Orchestrated the full pipeline with Apache Airflow, including monthly processing, dependency management, retries, and final quality gates.
 - Added a period refresh Airflow DAG for safe month-level and interval reloads without truncating the entire ClickHouse serving layer.
 - Implemented `replace_period` mode with ClickHouse month deletion, monthly Spark reprocessing, ClickHouse reload, and month-level serving-layer quality checks.
+- Centralized shared ClickHouse HTTP helpers in `clickhouse_utils.py` to avoid duplicated connection, authentication, timeout, error-handling, and JSON parsing logic across ClickHouse utility jobs.
 - Loaded business-ready gold marts into ClickHouse as an analytical serving layer for fast BI queries.
 - Built a Superset BI dashboard for executive reporting, demand analysis, payment behavior, geospatial demand patterns, and ridesharing opportunity analysis.
 - Added data quality checks for Silver, Gold Object Storage, and ClickHouse layers to prevent invalid data from reaching BI reports.
@@ -108,6 +109,7 @@ nyc_taxi_final_project/
 ├── jobs/
 │   ├── config.py
 │   ├── period_utils.py
+│   ├── clickhouse_utils.py
 │   ├── bronze_yellow_taxi.py
 │   ├── silver_yellow_taxi.py
 │   ├── check_yellow_taxi_quality.py
@@ -131,6 +133,7 @@ nyc_taxi_final_project/
 │   ├── test_config.py
 │   ├── test_dag.py
 │   ├── test_period_utils.py
+│   ├── test_clickhouse_utils.py
 │   ├── test_delete_clickhouse_gold_month.py
 │   ├── test_check_clickhouse_gold_month_quality.py
 │   ├── test_period_refresh_dag.py
@@ -506,6 +509,26 @@ jobs/load_gold_daily_trips_to_clickhouse.py
 jobs/load_gold_hourly_trips_to_clickhouse.py
 jobs/load_gold_location_pair_stats_to_clickhouse.py
 jobs/load_gold_payment_type_stats_to_clickhouse.py
+```
+
+Shared ClickHouse HTTP execution logic is centralized in:
+
+```text
+jobs/clickhouse_utils.py
+```
+
+This module is reused by ClickHouse utility and quality-check jobs for query execution, Basic Auth handling, timeout handling, error handling, optional response printing, and JSON response parsing.
+
+It is used by jobs such as:
+
+```text
+jobs/create_clickhouse_gold_tables.py
+jobs/truncate_clickhouse_gold_tables.py
+jobs/delete_clickhouse_gold_month.py
+jobs/check_clickhouse_gold_quality.py
+jobs/check_clickhouse_gold_month_quality.py
+jobs/load_taxi_zone_centroids_to_clickhouse.py
+jobs/run_clickhouse_sql_file.py
 ```
 
 Before a full refresh, the DAG runs two ClickHouse preparation steps:
@@ -926,6 +949,7 @@ Test files:
 ```text
 tests/test_config.py
 tests/test_period_utils.py
+tests/test_clickhouse_utils.py
 tests/test_dag.py
 tests/test_period_refresh_dag.py
 tests/test_silver_transformations.py
@@ -948,6 +972,18 @@ This test module validates project configuration logic:
 - S3/Object Storage path helpers;
 - raw, bronze, silver, quality, bad records, and gold layer paths;
 - taxi zone lookup path.
+
+### `test_clickhouse_utils.py`
+
+This test module validates shared ClickHouse HTTP helper logic:
+
+- ClickHouse HTTP URL construction;
+- POST request creation;
+- Basic Auth handling;
+- optional response printing;
+- HTTP and connection error handling;
+- JSON response parsing;
+- single-row JSON result validation.
 
 ### `test_dag.py`
 
@@ -1052,7 +1088,8 @@ Covered quality modules:
 - `check_gold_schema.py`;
 - `check_clickhouse_gold_quality.py`;
 - `check_clickhouse_gold_month_quality.py`;
-- `delete_clickhouse_gold_month.py`.
+- `delete_clickhouse_gold_month.py`;
+- `clickhouse_utils.py`.
 
 The tests validate:
 
@@ -1065,6 +1102,7 @@ The tests validate:
 - JSON result parsing and validation for ClickHouse quality metrics;
 - ClickHouse month-level delete query construction;
 - ClickHouse month-level quality validation logic;
+- shared ClickHouse HTTP helper behavior, including authentication, response parsing, and error handling;
 - month-scoped serving-layer validation for safe period refreshes.
 
 ### Running Tests
@@ -1129,6 +1167,7 @@ Main improvements:
 - replaced full parquet `count()` checks in ClickHouse load jobs with lightweight `take(1)` non-empty checks;
 - replaced full ClickHouse table counts after monthly loads with targeted counts for the loaded `year` and `month`;
 - consolidated final ClickHouse quality checks into fewer aggregate SQL queries;
+- centralized shared ClickHouse HTTP helper logic in `clickhouse_utils.py` and reused it across ClickHouse utility and quality-check jobs;
 - added `try/finally` blocks to Spark jobs to ensure `spark.stop()` is called even if a job fails;
 - improved the taxi zone centroid loader with stronger validation checks, a working-directory-independent CSV path, and explicit handling of known duplicate `location_id` values caused by multi-part taxi zone geometries.
 
@@ -1306,8 +1345,7 @@ Possible future improvements:
 - add dynamic task mapping for production-like period refresh runs with runtime parameters;
 - add automatic raw file discovery for processing newly arrived monthly files;
 - add a protected `full_rebuild` mode to the period refresh DAG or keep it as a separate controlled full-year DAG;
-- add ClickHouse schema migration/versioning approach;
-- move shared ClickHouse HTTP helpers into a reusable `clickhouse_utils.py` module during the schema migration/versioning phase;
+- add ClickHouse schema migration/versioning using the shared `clickhouse_utils.py` module as the common execution layer;
 - add dbt layer for analytical transformations or document dbt as a future analytical modeling layer;
 - verify Superset dashboard import on a clean Superset instance as a reproducible BI artifact;
 - migrate Spark compute to Yandex Data Proc or another cloud Spark runtime as a separate cloud execution phase;

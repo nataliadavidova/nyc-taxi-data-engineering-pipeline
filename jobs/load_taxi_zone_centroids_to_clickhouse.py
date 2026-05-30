@@ -38,12 +38,12 @@ Production-like improvements:
    - a setup job should fail if the lookup table is incomplete or corrupted;
    - Superset geospatial charts depend on this table.
 
-3. The script no longer imports execute_clickhouse_query from
-   truncate_clickhouse_gold_tables.py.
+3. The script uses shared ClickHouse HTTP helpers from
+   jobs/clickhouse_utils.py.
    Why:
-   - importing a helper from a truncate job is confusing;
-   - this script now has its own small ClickHouse HTTP helper.
-   - later we can move common ClickHouse helpers into jobs/clickhouse_utils.py.
+   - ClickHouse connection logic is centralized across utility scripts;
+   - this avoids duplicating URL construction, authentication, timeout, and
+     error handling logic.
 
 4. The table is loaded with truncate + reload.
    Why:
@@ -51,18 +51,11 @@ Production-like improvements:
    - running the script multiple times should not create duplicates.
 """
 
-from base64 import b64encode
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
+from clickhouse_utils import execute_clickhouse_query
 from config import (
     CLICKHOUSE_DATABASE,
-    CLICKHOUSE_HOST,
-    CLICKHOUSE_PASSWORD,
-    CLICKHOUSE_PORT,
-    CLICKHOUSE_USER,
     validate_config,
 )
 
@@ -104,59 +97,6 @@ def get_target_table() -> str:
     """
 
     return f"{CLICKHOUSE_DATABASE}.taxi_zone_centroids"
-
-
-def get_clickhouse_url() -> str:
-    """
-    Build ClickHouse HTTP URL.
-
-    This script uses ClickHouse HTTP interface because it loads a tiny CSV file
-    and runs simple validation queries. Spark is not needed here.
-    """
-
-    query_params = urlencode({"database": CLICKHOUSE_DATABASE})
-    return f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/?{query_params}"
-
-
-def execute_clickhouse_query(query: str, print_response: bool = True) -> str:
-    """
-    Execute a ClickHouse query through the HTTP interface and return response text.
-
-    print_response=False is useful for helper queries where we parse the result
-    and print a clearer custom message afterwards.
-    """
-
-    validate_config()
-
-    request = Request(
-        url=get_clickhouse_url(),
-        data=query.encode("utf-8"),
-        method="POST",
-    )
-
-    auth_token = b64encode(
-        f"{CLICKHOUSE_USER}:{CLICKHOUSE_PASSWORD or ''}".encode("utf-8")
-    ).decode("ascii")
-
-    request.add_header("Authorization", f"Basic {auth_token}")
-
-    try:
-        with urlopen(request, timeout=120) as response:
-            response_text = response.read().decode("utf-8").strip()
-
-            if response_text and print_response:
-                print(response_text)
-
-            return response_text
-
-    except HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(
-            f"ClickHouse HTTP error {error.code}: {error_body}"
-        ) from error
-
-    except URLError as error:
-        raise RuntimeError(f"Cannot connect to ClickHouse: {error}") from error
 
 
 def validate_input_file(csv_path: Path) -> None:
