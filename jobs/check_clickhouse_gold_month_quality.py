@@ -36,22 +36,16 @@ Implementation notes:
 from __future__ import annotations
 
 import argparse
-import base64
-import json
-import urllib.error
-import urllib.request
 from typing import Any, Dict, List
 
+from clickhouse_utils import fetch_json_data, fetch_single_json_row
 from config import (
     CLICKHOUSE_DATABASE,
-    CLICKHOUSE_HOST,
-    CLICKHOUSE_PASSWORD,
-    CLICKHOUSE_PORT,
-    CLICKHOUSE_USER,
     GOLD_CLICKHOUSE_TABLES,
     get_month_boundaries,
     validate_config,
 )
+
 from period_utils import validate_month_period_range
 
 
@@ -78,92 +72,6 @@ def normalize_year_month(year: int | str, month: int | str) -> tuple[str, str]:
     )
 
     return str(normalized_year), f"{normalized_month:02d}"
-
-
-def get_clickhouse_url() -> str:
-    """
-    Build ClickHouse HTTP URL.
-
-    The database is explicitly referenced in SQL queries, so we do not need
-    to pass it as a URL parameter here.
-    """
-
-    return f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/"
-
-
-def execute_clickhouse_query(query: str) -> str:
-    """
-    Execute a ClickHouse query via HTTP and return response text.
-
-    Later, this helper can be moved into jobs/clickhouse_utils.py if we decide
-    to centralize ClickHouse utilities.
-    """
-
-    validate_config()
-
-    request = urllib.request.Request(
-        url=get_clickhouse_url(),
-        data=query.encode("utf-8"),
-        method="POST",
-    )
-
-    if CLICKHOUSE_USER:
-        credentials = f"{CLICKHOUSE_USER}:{CLICKHOUSE_PASSWORD or ''}".encode(
-            "utf-8"
-        )
-        encoded_credentials = base64.b64encode(credentials).decode("utf-8")
-        request.add_header("Authorization", f"Basic {encoded_credentials}")
-
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            return response.read().decode("utf-8").strip()
-
-    except urllib.error.HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-
-        raise RuntimeError(
-            "ClickHouse query failed:\n"
-            f"{query}\n\n"
-            f"Status code: {error.code}\n"
-            f"Response: {error_body}"
-        ) from error
-
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Cannot connect to ClickHouse: {error}") from error
-
-
-def fetch_json_data(query: str) -> List[Dict[str, Any]]:
-    """
-    Execute a ClickHouse query with FORMAT JSON and return the data rows.
-
-    We expect queries passed here to end with FORMAT JSON.
-    """
-
-    response_text = execute_clickhouse_query(query)
-
-    if not response_text:
-        raise ValueError(f"Query returned empty result:\n{query}")
-
-    response_json = json.loads(response_text)
-
-    return response_json["data"]
-
-
-def fetch_single_json_row(query: str) -> Dict[str, Any]:
-    """
-    Execute a query that must return exactly one row.
-
-    Aggregate quality queries should always return exactly one row.
-    """
-
-    rows = fetch_json_data(query)
-
-    if len(rows) != 1:
-        raise ValueError(
-            f"Expected query to return exactly one row, got {len(rows)}:\n{query}"
-        )
-
-    return rows[0]
 
 
 def build_tables_exist_query() -> str:

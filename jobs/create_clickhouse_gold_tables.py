@@ -9,10 +9,8 @@ This script is idempotent:
 It should run before loading gold marts into ClickHouse.
 """
 
-from truncate_clickhouse_gold_tables import (
-    CLICKHOUSE_DATABASE,
-    execute_clickhouse_query,
-)
+from config import CLICKHOUSE_DATABASE
+from clickhouse_utils import execute_clickhouse_query
 
 
 def create_database() -> None:

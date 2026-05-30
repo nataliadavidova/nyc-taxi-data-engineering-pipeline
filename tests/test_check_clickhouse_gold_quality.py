@@ -1,4 +1,3 @@
-import json
 
 import pytest
 
@@ -9,8 +8,6 @@ from check_clickhouse_gold_quality import (
     GOLD_TABLES,
     build_quality_query,
     empty_string_count_expression,
-    fetch_json_data,
-    fetch_single_json_row,
     validate_common_table_metrics,
     validate_location_metrics,
     validate_payment_metrics,
@@ -84,69 +81,6 @@ def test_build_quality_query_for_payment_table_contains_payment_checks():
 
     assert "empty_pickup_zone_count" not in query
     assert "empty_dropoff_zone_count" not in query
-
-
-def test_fetch_json_data_parses_clickhouse_json_response(monkeypatch):
-    response = {
-        "meta": [{"name": "name", "type": "String"}],
-        "data": [{"name": "gold_daily_trips"}],
-        "rows": 1,
-    }
-
-    monkeypatch.setattr(
-        ch_quality,
-        "execute_clickhouse_query",
-        lambda query: json.dumps(response),
-    )
-
-    rows = fetch_json_data("SELECT name FORMAT JSON")
-
-    assert rows == [{"name": "gold_daily_trips"}]
-
-
-def test_fetch_json_data_fails_for_empty_response(monkeypatch):
-    monkeypatch.setattr(
-        ch_quality,
-        "execute_clickhouse_query",
-        lambda query: "",
-    )
-
-    with pytest.raises(ValueError, match="Query returned empty result"):
-        fetch_json_data("SELECT name FORMAT JSON")
-
-
-def test_fetch_single_json_row_returns_one_row(monkeypatch):
-    monkeypatch.setattr(
-        ch_quality,
-        "fetch_json_data",
-        lambda query: [{"rows_count": 10}],
-    )
-
-    row = fetch_single_json_row("SELECT count() FORMAT JSON")
-
-    assert row == {"rows_count": 10}
-
-
-def test_fetch_single_json_row_fails_for_zero_rows(monkeypatch):
-    monkeypatch.setattr(
-        ch_quality,
-        "fetch_json_data",
-        lambda query: [],
-    )
-
-    with pytest.raises(ValueError, match="exactly one row"):
-        fetch_single_json_row("SELECT count() FORMAT JSON")
-
-
-def test_fetch_single_json_row_fails_for_multiple_rows(monkeypatch):
-    monkeypatch.setattr(
-        ch_quality,
-        "fetch_json_data",
-        lambda query: [{"rows_count": 10}, {"rows_count": 20}],
-    )
-
-    with pytest.raises(ValueError, match="exactly one row"):
-        fetch_single_json_row("SELECT count() FORMAT JSON")
 
 
 def test_assert_gold_tables_exist_passes_when_all_expected_tables_exist(monkeypatch):

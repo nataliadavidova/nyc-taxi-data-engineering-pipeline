@@ -13,105 +13,15 @@ This script is intentionally simple:
     - it only sends TRUNCATE TABLE commands to ClickHouse;
     - performance optimization is not critical here.
 
-Production-like improvements:
-1. validate_config() is called before executing ClickHouse commands.
-   Why:
-   - fail fast if ClickHouse connection settings are missing.
-
-2. HTTP requests use timeout.
-   Why:
-   - the job should not hang forever if ClickHouse is unavailable.
-
-3. Empty password is handled safely.
-   Why:
-   - avoid creating credentials like "user:None".
-
-4. URLError is handled explicitly.
-   Why:
-   - connection failures should produce a clear error message.
-
-5. execute_clickhouse_query returns response text.
-   Why:
-   - the helper becomes reusable by other small ClickHouse utility scripts.
+ClickHouse HTTP execution is handled by jobs/clickhouse_utils.py.
 """
-
-import base64
-import urllib.error
-import urllib.request
 
 from config import (
     CLICKHOUSE_DATABASE,
-    CLICKHOUSE_HOST,
-    CLICKHOUSE_PASSWORD,
-    CLICKHOUSE_PORT,
-    CLICKHOUSE_USER,
+    GOLD_CLICKHOUSE_TABLES,
     validate_config,
 )
-
-
-GOLD_TABLES = [
-    "gold_daily_trips",
-    "gold_hourly_trips",
-    "gold_location_pair_stats",
-    "gold_payment_type_stats",
-]
-
-
-def get_clickhouse_url() -> str:
-    """
-    Build ClickHouse HTTP URL.
-    """
-
-    return f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/"
-
-
-def execute_clickhouse_query(query: str) -> str:
-    """
-    Execute a ClickHouse query via HTTP and return response text.
-
-    This helper is used by truncate_clickhouse_gold_tables.py and currently
-    also imported by create_clickhouse_gold_tables.py.
-
-    Later, if we introduce ClickHouse schema migration/versioning, this helper
-    can be moved into a dedicated clickhouse_utils.py module.
-    """
-
-    validate_config()
-
-    request = urllib.request.Request(
-        url=get_clickhouse_url(),
-        data=query.encode("utf-8"),
-        method="POST",
-    )
-
-    if CLICKHOUSE_USER:
-        credentials = f"{CLICKHOUSE_USER}:{CLICKHOUSE_PASSWORD or ''}".encode(
-            "utf-8"
-        )
-        encoded_credentials = base64.b64encode(credentials).decode("utf-8")
-        request.add_header("Authorization", f"Basic {encoded_credentials}")
-
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            response_body = response.read().decode("utf-8").strip()
-
-            if response_body:
-                print(response_body)
-
-            return response_body
-
-    except urllib.error.HTTPError as error:
-        error_body = error.read().decode("utf-8", errors="replace")
-
-        raise RuntimeError(
-            "ClickHouse query failed:\n"
-            f"{query}\n\n"
-            f"Status code: {error.code}\n"
-            f"Response: {error_body}"
-        ) from error
-
-    except urllib.error.URLError as error:
-        raise RuntimeError(f"Cannot connect to ClickHouse: {error}") from error
+from clickhouse_utils import execute_clickhouse_query
 
 
 def truncate_gold_table(table_name: str) -> None:
@@ -127,7 +37,6 @@ def truncate_gold_table(table_name: str) -> None:
 
     print(f"Executing: {query}")
     execute_clickhouse_query(query)
-
 
 def main() -> None:
     """

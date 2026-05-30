@@ -25,7 +25,7 @@ from typing import Sequence
 
 from config import CLICKHOUSE_DATABASE, GOLD_CLICKHOUSE_TABLES
 from period_utils import validate_month_period_range
-from truncate_clickhouse_gold_tables import execute_clickhouse_query
+from clickhouse_utils import execute_clickhouse_query
 
 
 def normalize_year_month(year: int | str, month: int | str) -> tuple[str, str]:

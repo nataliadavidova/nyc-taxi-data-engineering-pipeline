@@ -1,4 +1,3 @@
-import json
 
 import pytest
 
@@ -107,57 +106,6 @@ def test_build_quality_query_for_payment_table():
 
     assert "empty_trip_type_count" in query
     assert "empty_payment_type_name_count" in query
-
-
-def test_fetch_json_data(monkeypatch):
-    def fake_execute_clickhouse_query(query):
-        return json.dumps(
-            {
-                "meta": [{"name": "name", "type": "String"}],
-                "data": [{"name": "gold_daily_trips"}],
-                "rows": 1,
-            }
-        )
-
-    monkeypatch.setattr(
-        job,
-        "execute_clickhouse_query",
-        fake_execute_clickhouse_query,
-    )
-
-    assert job.fetch_json_data("SELECT 1 FORMAT JSON") == [
-        {"name": "gold_daily_trips"}
-    ]
-
-
-def test_fetch_json_data_rejects_empty_response(monkeypatch):
-    monkeypatch.setattr(job, "execute_clickhouse_query", lambda query: "")
-
-    with pytest.raises(ValueError, match="Query returned empty result"):
-        job.fetch_json_data("SELECT 1 FORMAT JSON")
-
-
-def test_fetch_single_json_row(monkeypatch):
-    monkeypatch.setattr(
-        job,
-        "fetch_json_data",
-        lambda query: [{"rows_count": 1}],
-    )
-
-    assert job.fetch_single_json_row("SELECT 1 FORMAT JSON") == {
-        "rows_count": 1
-    }
-
-
-def test_fetch_single_json_row_rejects_multiple_rows(monkeypatch):
-    monkeypatch.setattr(
-        job,
-        "fetch_json_data",
-        lambda query: [{"x": 1}, {"x": 2}],
-    )
-
-    with pytest.raises(ValueError, match="exactly one row"):
-        job.fetch_single_json_row("SELECT 1 FORMAT JSON")
 
 
 def test_assert_gold_tables_exist_success(monkeypatch):
