@@ -11,4 +11,5 @@ USER airflow
 RUN pip install --no-cache-dir \
     pyspark==3.5.1 \
     python-dotenv \
+    boto3 \
     pytest

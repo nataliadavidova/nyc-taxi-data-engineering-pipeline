@@ -21,7 +21,8 @@ This project demonstrates core data engineering practices:
 - Docker-based local infrastructure;
 - centralized configuration, reusable path helpers, and shared ClickHouse HTTP utilities;
 - full-year historical data processing;
-- configured period refresh for safe month-level and interval reloads.
+- configured period refresh for safe month-level and interval reloads;
+- raw monthly file discovery foundation for identifying newly arrived data.
 
 ## Project Highlights
 
@@ -31,6 +32,7 @@ This project demonstrates core data engineering practices:
 - Orchestrated the full pipeline with Apache Airflow, including monthly processing, dependency management, retries, and final quality gates.
 - Added a period refresh Airflow DAG for safe month-level and interval reloads without truncating the entire ClickHouse serving layer.
 - Implemented `replace_period` mode with ClickHouse month deletion, monthly Spark reprocessing, ClickHouse reload, and month-level serving-layer quality checks.
+- Added raw monthly file discovery helpers to identify new Yellow Taxi raw periods by comparing Object Storage files with periods already loaded into ClickHouse.
 - Centralized shared ClickHouse HTTP helpers in `clickhouse_utils.py` to avoid duplicated connection, authentication, timeout, error-handling, and JSON parsing logic across ClickHouse utility jobs.
 - Loaded business-ready gold marts into ClickHouse as an analytical serving layer for fast BI queries.
 - Built a Superset BI dashboard for executive reporting, demand analysis, payment behavior, geospatial demand patterns, and ridesharing opportunity analysis.
@@ -110,6 +112,7 @@ nyc_taxi_final_project/
 │   ├── config.py
 │   ├── period_utils.py
 │   ├── clickhouse_utils.py
+│   ├── raw_discovery.py
 │   ├── bronze_yellow_taxi.py
 │   ├── silver_yellow_taxi.py
 │   ├── check_yellow_taxi_quality.py
@@ -134,6 +137,7 @@ nyc_taxi_final_project/
 │   ├── test_dag.py
 │   ├── test_period_utils.py
 │   ├── test_clickhouse_utils.py
+│   ├── test_raw_discovery.py
 │   ├── test_delete_clickhouse_gold_month.py
 │   ├── test_check_clickhouse_gold_month_quality.py
 │   ├── test_period_refresh_dag.py
@@ -197,6 +201,36 @@ A taxi zone lookup file is also used to enrich pickup and dropoff location IDs w
 ```text
 nyc_taxi/raw/lookup/taxi_zone_lookup.csv
 ```
+
+### Raw File Discovery
+
+The project includes raw monthly file discovery helpers:
+
+```text
+jobs/raw_discovery.py
+```
+
+This module is a foundation for future incremental processing of newly arrived monthly raw files.
+
+It can:
+
+- parse raw Yellow Taxi object keys from S3-compatible Object Storage;
+- extract and validate `year` and `month` from raw parquet paths;
+- ignore unrelated files such as lookup files, wrong taxi types, or malformed paths;
+- list raw Yellow Taxi periods from Object Storage;
+- list already processed periods from the ClickHouse serving layer;
+- compare raw periods with processed ClickHouse periods;
+- return new raw periods that still need to be processed.
+
+Current discovery logic defines:
+
+```text
+new periods = raw periods from Object Storage - processed periods from ClickHouse
+```
+
+For the first implementation, ClickHouse is used as the source of truth for processed periods because it is the final serving layer used by Superset.
+
+This module does not yet trigger an Airflow pipeline by itself. A future improvement may add an Airflow DAG or task flow that uses this helper to process newly arrived monthly files automatically.
 
 ## Data Pipeline
 
@@ -950,6 +984,7 @@ Test files:
 tests/test_config.py
 tests/test_period_utils.py
 tests/test_clickhouse_utils.py
+tests/test_raw_discovery.py
 tests/test_dag.py
 tests/test_period_refresh_dag.py
 tests/test_silver_transformations.py
@@ -984,6 +1019,20 @@ This test module validates shared ClickHouse HTTP helper logic:
 - HTTP and connection error handling;
 - JSON response parsing;
 - single-row JSON result validation.
+
+### `test_raw_discovery.py`
+
+This test module validates raw monthly file discovery logic without requiring real Object Storage or ClickHouse access:
+
+- raw Yellow Taxi object key parsing;
+- invalid raw key filtering;
+- wrong taxi type and wrong layer filtering;
+- mismatched path and filename period rejection;
+- duplicate raw period handling;
+- chronological period sorting;
+- raw minus processed period comparison;
+- processed period parsing from mocked ClickHouse JSON results;
+- formatting discovered periods for logs.
 
 ### `test_dag.py`
 
@@ -1103,6 +1152,7 @@ The tests validate:
 - ClickHouse month-level delete query construction;
 - ClickHouse month-level quality validation logic;
 - shared ClickHouse HTTP helper behavior, including authentication, response parsing, and error handling;
+- raw monthly file discovery logic for identifying newly arrived data;
 - month-scoped serving-layer validation for safe period refreshes.
 
 ### Running Tests
@@ -1343,7 +1393,7 @@ Possible future improvements:
 
 - move period refresh configuration from static DAG constants to Airflow Params or Trigger DAG config with validation;
 - add dynamic task mapping for production-like period refresh runs with runtime parameters;
-- add automatic raw file discovery for processing newly arrived monthly files;
+- add an Airflow DAG or task flow that uses `raw_discovery.py` to automatically process newly arrived monthly files;
 - add a protected `full_rebuild` mode to the period refresh DAG or keep it as a separate controlled full-year DAG;
 - add ClickHouse schema migration/versioning using the shared `clickhouse_utils.py` module as the common execution layer;
 - add dbt layer for analytical transformations or document dbt as a future analytical modeling layer;
