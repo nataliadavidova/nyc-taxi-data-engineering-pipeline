@@ -22,7 +22,7 @@ This project demonstrates core data engineering practices:
 - centralized configuration, reusable path helpers, and shared ClickHouse HTTP utilities;
 - full-year historical data processing;
 - configured period refresh for safe month-level and interval reloads;
-- raw monthly file discovery foundation for identifying newly arrived data.
+- raw monthly file discovery and automated new-month processing with a dedicated Airflow DAG.
 
 ## Project Highlights
 
@@ -32,7 +32,9 @@ This project demonstrates core data engineering practices:
 - Orchestrated the full pipeline with Apache Airflow, including monthly processing, dependency management, retries, and final quality gates.
 - Added a period refresh Airflow DAG for safe month-level and interval reloads without truncating the entire ClickHouse serving layer.
 - Implemented `replace_period` mode with ClickHouse month deletion, monthly Spark reprocessing, ClickHouse reload, and month-level serving-layer quality checks.
-- Added raw monthly file discovery helpers to identify new Yellow Taxi raw periods by comparing Object Storage files with periods already loaded into ClickHouse.
+- Added raw monthly file discovery helpers to identify new Yellow Taxi raw periods by comparing Object Storage files with periods fully loaded into all ClickHouse gold tables. 
+- Added `nyc_taxi_process_new_months_pipeline`, an Airflow DAG that automatically processes newly discovered raw months using dynamic task mapping and a mapped monthly TaskGroup. 
+- Validated the new-month processing flow on real TLC Yellow Taxi data for `2025-01`; the DAG loaded the month into all ClickHouse gold marts, passed month-level quality checks, and became a successful no-op on the second run.
 - Centralized shared ClickHouse HTTP helpers in `clickhouse_utils.py` to avoid duplicated connection, authentication, timeout, error-handling, and JSON parsing logic across ClickHouse utility jobs.
 - Loaded business-ready gold marts into ClickHouse as an analytical serving layer for fast BI queries.
 - Built a Superset BI dashboard for executive reporting, demand analysis, payment behavior, geospatial demand patterns, and ridesharing opportunity analysis.
@@ -107,7 +109,8 @@ nyc_taxi_final_project/
 │       └── ci.yml
 ├── dags/
 │   ├── nyc_taxi_pipeline.py
-│   └── nyc_taxi_period_refresh_pipeline.py
+│   ├── nyc_taxi_period_refresh_pipeline.py
+│   └── nyc_taxi_process_new_months_pipeline.py
 ├── jobs/
 │   ├── config.py
 │   ├── period_utils.py
@@ -141,6 +144,7 @@ nyc_taxi_final_project/
 │   ├── test_delete_clickhouse_gold_month.py
 │   ├── test_check_clickhouse_gold_month_quality.py
 │   ├── test_period_refresh_dag.py
+│   ├── test_process_new_months_dag.py
 │   ├── test_silver_transformations.py
 │   ├── test_gold_daily_transformations.py
 │   ├── test_gold_hourly_transformations.py
@@ -210,7 +214,7 @@ The project includes raw monthly file discovery helpers:
 jobs/raw_discovery.py
 ```
 
-This module is a foundation for future incremental processing of newly arrived monthly raw files.
+This module supports automated incremental-style processing of newly arrived monthly raw files.
 
 It can:
 
@@ -218,19 +222,34 @@ It can:
 - extract and validate `year` and `month` from raw parquet paths;
 - ignore unrelated files such as lookup files, wrong taxi types, or malformed paths;
 - list raw Yellow Taxi periods from Object Storage;
-- list already processed periods from the ClickHouse serving layer;
-- compare raw periods with processed ClickHouse periods;
+- list periods already fully processed in the ClickHouse serving layer;
+- compare raw periods with fully processed ClickHouse periods;
 - return new raw periods that still need to be processed.
 
 Current discovery logic defines:
 
 ```text
-new periods = raw periods from Object Storage - processed periods from ClickHouse
+new periods = raw periods from Object Storage - fully processed periods from ClickHouse
 ```
 
-For the first implementation, ClickHouse is used as the source of truth for processed periods because it is the final serving layer used by Superset.
+A period is considered fully processed only if it exists in all expected ClickHouse gold tables:
 
-This module does not yet trigger an Airflow pipeline by itself. A future improvement may add an Airflow DAG or task flow that uses this helper to process newly arrived monthly files automatically.
+```text
+gold_daily_trips
+gold_hourly_trips
+gold_location_pair_stats
+gold_payment_type_stats
+```
+
+This protects the pipeline from skipping partially loaded months. For example, if a month exists in `gold_daily_trips` but is missing from another gold table, it is not treated as fully processed and can be safely picked up by the new-month processing DAG.
+
+The discovery helper is used by:
+
+```text
+dags/nyc_taxi_process_new_months_pipeline.py
+```
+
+The new-month DAG discovers raw periods at runtime and processes only months that are present in Object Storage but not yet fully loaded into ClickHouse.
 
 ## Data Pipeline
 
@@ -659,11 +678,12 @@ The `gold_location_pair_stats` mart is enriched with readable taxi zone names, f
 
 The pipeline is orchestrated with Apache Airflow.
 
-The project currently includes two Airflow DAGs:
+The project includes three Airflow DAGs for different processing scenarios:
 
 ```text
 dags/nyc_taxi_pipeline.py
 dags/nyc_taxi_period_refresh_pipeline.py
+dags/nyc_taxi_process_new_months_pipeline.py
 ```
 
 ### Full-Year Pipeline DAG
@@ -674,7 +694,7 @@ The main full-year pipeline DAG is:
 nyc_taxi_pipeline
 ```
 
-This DAG processes all months of 2024 and runs the full pipeline:
+This DAG processes all configured 2024 months and runs the full pipeline:
 
 ```text
 create ClickHouse gold tables
@@ -709,6 +729,8 @@ The DAG first ensures that all ClickHouse gold tables exist, then truncates them
 For each month, the DAG validates gold parquet marts in Object Storage before loading them into ClickHouse.
 
 The final `check_clickhouse_gold_quality` task verifies that the ClickHouse serving layer is complete and ready for Superset reporting.
+
+This DAG is intended for controlled full-year rebuilds, not for incremental monthly updates.
 
 ### Period Refresh DAG
 
@@ -788,9 +810,125 @@ The period refresh DAG has been manually tested in Airflow for:
 
 Both test runs completed successfully in `replace_period` mode.
 
-Current implementation uses static period configuration inside the DAG file. Future improvements may move this configuration to Airflow Params or Trigger DAG config with validation and dynamic task mapping.
+Current implementation uses static period configuration inside the DAG file. Future improvements may move this configuration to Airflow Params or Trigger DAG config with validation.
 
-Airflow is used to manage task dependencies, retries, and execution visibility.
+### New-Month Processing DAG
+
+The project also includes a new-month processing DAG:
+
+```text
+nyc_taxi_process_new_months_pipeline
+```
+
+This DAG is designed to automatically process newly arrived raw monthly files.
+
+It uses:
+
+```text
+jobs/raw_discovery.py
+```
+
+to compare raw monthly Yellow Taxi files in Object Storage with periods already fully processed in ClickHouse.
+
+Current discovery logic:
+
+```text
+new periods = raw periods from Object Storage - fully processed periods from ClickHouse
+```
+
+A period is considered fully processed only if it exists in all expected ClickHouse gold tables:
+
+```text
+gold_daily_trips
+gold_hourly_trips
+gold_location_pair_stats
+gold_payment_type_stats
+```
+
+This protects the pipeline from skipping partially loaded months.
+
+Processing flow:
+
+```text
+discover new raw periods
+        │
+        ▼
+process each discovered month
+        │
+        ▼
+load the month into ClickHouse
+        │
+        ▼
+run month-level quality checks
+```
+
+The DAG uses Airflow dynamic task mapping with a mapped monthly TaskGroup:
+
+```text
+process_month[0]
+process_month[1]
+...
+```
+
+Each mapped `process_month` group runs the full monthly pipeline for one discovered period:
+
+```text
+delete ClickHouse month
+        │
+        ▼
+bronze monthly job
+        │
+        ▼
+silver monthly job
+        │
+        ▼
+silver quality check
+        │
+        ▼
+gold_daily / gold_hourly / gold_payment / gold_location
+        │
+        ▼
+gold schema check
+        │
+        ▼
+ClickHouse loads
+        │
+        ▼
+ClickHouse month quality check
+```
+
+Safety behavior:
+
+- only raw periods not fully processed in ClickHouse are selected;
+- before processing a discovered month, the DAG deletes this month from ClickHouse gold tables;
+- for a truly new month, this delete step removes zero rows;
+- for a partially loaded month, it cleans up inconsistent ClickHouse data before rebuilding;
+- if no new raw periods are found, the DAG finishes successfully as a no-op.
+
+Local execution settings:
+
+```text
+max_active_runs = 1
+max_active_tasks = 1
+```
+
+These settings keep Spark jobs sequential and safe for local Docker execution.
+
+The new-month DAG was validated on real TLC Yellow Taxi data for:
+
+```text
+2025-01
+```
+
+Validation result:
+
+- `2025-01` was detected as a new raw period;
+- the DAG processed the month end-to-end;
+- all ClickHouse gold marts received rows for `2025-01`;
+- month-level ClickHouse quality checks passed;
+- a second DAG run detected no new periods and completed successfully as a no-op.
+
+Airflow is used to manage task dependencies, retries, execution visibility, and safe orchestration across all pipeline modes.
 
 ## Superset BI Dashboard
 
@@ -987,6 +1125,7 @@ tests/test_clickhouse_utils.py
 tests/test_raw_discovery.py
 tests/test_dag.py
 tests/test_period_refresh_dag.py
+tests/test_process_new_months_dag.py
 tests/test_silver_transformations.py
 tests/test_gold_daily_transformations.py
 tests/test_gold_hourly_transformations.py
@@ -1030,8 +1169,10 @@ This test module validates raw monthly file discovery logic without requiring re
 - mismatched path and filename period rejection;
 - duplicate raw period handling;
 - chronological period sorting;
-- raw minus processed period comparison;
+- raw minus fully processed period comparison;
 - processed period parsing from mocked ClickHouse JSON results;
+- fully processed period detection using intersection across all ClickHouse gold tables;
+- partially loaded period exclusion;
 - formatting discovered periods for logs.
 
 ### `test_dag.py`
@@ -1067,6 +1208,25 @@ This test module validates the period refresh Airflow DAG structure:
 - ClickHouse load tasks run after the gold schema check;
 - ClickHouse month-level quality check runs after all ClickHouse load tasks;
 - months are processed sequentially.
+
+### `test_process_new_months_dag.py`
+
+This test module validates the new-month processing Airflow DAG structure:
+
+- DAG imports without errors;
+- `nyc_taxi_process_new_months_pipeline` DAG exists;
+- local-safe concurrency settings are configured;
+- top-level discovery, logging, processing, and finish tasks exist;
+- mapped `process_month` TaskGroup tasks exist;
+- full-rebuild-only tasks such as `truncate_clickhouse_gold_tables` are not used;
+- ClickHouse table creation runs before raw discovery;
+- discovery runs before logging and monthly processing;
+- monthly processing dependencies inside the mapped TaskGroup are correct;
+- Gold marts run after the Silver quality check;
+- Gold schema check runs after all monthly Gold marts;
+- ClickHouse load tasks run after the Gold schema check;
+- ClickHouse month-level quality check runs after all ClickHouse loads;
+- `finish` uses a no-op-safe trigger rule and runs after logging and monthly processing.
 
 ### `test_period_utils.py`
 
@@ -1285,6 +1445,14 @@ For safe month-level or interval refreshes, use the period refresh DAG:
 nyc_taxi_period_refresh_pipeline
 ```
 
+For automated processing of newly arrived raw monthly files, use the new-month processing DAG:
+
+```text
+nyc_taxi_process_new_months_pipeline
+```
+
+This DAG discovers raw Yellow Taxi monthly files in Object Storage and processes only periods that are not yet fully loaded into all ClickHouse gold tables.
+
 Current period refresh configuration is defined inside the DAG file:
 
 ```text
@@ -1314,6 +1482,10 @@ REFRESH_MODE = "replace_period"
 After changing the configured period, Airflow needs to re-parse the DAG file before the updated graph appears in the UI.
 
 The period refresh DAG should be used carefully because it deletes selected month data from ClickHouse before reloading it.
+
+The new-month processing DAG also deletes a discovered month from ClickHouse before processing it. For a truly new month this removes zero rows. For a partially loaded month, this cleans up inconsistent ClickHouse data before rebuilding and reloading the month.
+
+If no new raw periods are found, the DAG completes successfully as a no-op.
 
 ### 4. Open ClickHouse
 
@@ -1393,12 +1565,12 @@ Possible future improvements:
 
 - move period refresh configuration from static DAG constants to Airflow Params or Trigger DAG config with validation;
 - add dynamic task mapping for production-like period refresh runs with runtime parameters;
-- add an Airflow DAG or task flow that uses `raw_discovery.py` to automatically process newly arrived monthly files;
 - add a protected `full_rebuild` mode to the period refresh DAG or keep it as a separate controlled full-year DAG;
 - add ClickHouse schema migration/versioning using the shared `clickhouse_utils.py` module as the common execution layer;
 - add dbt layer for analytical transformations or document dbt as a future analytical modeling layer;
 - verify Superset dashboard import on a clean Superset instance as a reproducible BI artifact;
 - migrate Spark compute to Yandex Data Proc or another cloud Spark runtime as a separate cloud execution phase;
+- replace local subprocess-based Spark execution in the new-month DAG with production-like job submission to Yandex Data Proc or another managed Spark compute layer, where Airflow only orchestrates, monitors job status, and fails tasks when cloud jobs fail;
 - decide whether ClickHouse should remain local for portfolio usage or move to a cloud-hosted serving layer;
 - add Airflow failure callbacks and external notifications, such as Telegram or Slack alerts;
 - add runtime trend monitoring for Airflow tasks and Spark jobs;
