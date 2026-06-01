@@ -2,14 +2,20 @@
 Raw monthly file discovery helpers for NYC Taxi pipeline.
 
 This module detects which monthly raw Yellow Taxi files exist in Object Storage
-and compares them with periods already loaded into the ClickHouse serving layer.
+and compares them with periods fully loaded into the ClickHouse serving layer.
 
 Current approach:
     raw periods       = months discovered from Object Storage raw parquet keys;
-    processed periods = months found in ClickHouse gold serving tables;
+    processed periods = months fully present in all expected ClickHouse gold tables;
     new periods       = raw periods - processed periods.
 
-The first implementation keeps the logic lightweight:
+Why processed periods require all gold tables:
+    A month can be partially loaded if a pipeline run fails after loading only
+    some ClickHouse marts. In this case the month must not be treated as fully
+    processed. The discovery logic therefore uses the intersection of periods
+    found in all configured ClickHouse gold tables.
+
+The implementation keeps the logic lightweight:
 - parsing and set-difference logic is pure Python and unit-testable;
 - S3 listing uses boto3 only inside the runtime function;
 - ClickHouse processed-period discovery reuses clickhouse_utils.py.
@@ -18,7 +24,7 @@ The first implementation keeps the logic lightweight:
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Set, Tuple, Union
 
 from clickhouse_utils import fetch_json_data
 from config import (
@@ -26,6 +32,7 @@ from config import (
     AWS_SECRET_ACCESS_KEY,
     BUCKET_NAME,
     CLICKHOUSE_DATABASE,
+    GOLD_CLICKHOUSE_TABLES,
     NYC_TAXI_PREFIX,
     RAW_LAYER,
     S3_ENDPOINT,
@@ -37,6 +44,7 @@ from period_utils import validate_month_period_range
 
 
 Period = Tuple[str, str]
+YearMonthValue = Union[int, str]
 
 RAW_YELLOW_KEY_PATTERN = re.compile(
     rf"^{re.escape(NYC_TAXI_PREFIX)}/"
@@ -48,7 +56,7 @@ RAW_YELLOW_KEY_PATTERN = re.compile(
 )
 
 
-def normalize_period(year: int | str, month: int | str) -> Period:
+def normalize_period(year: YearMonthValue, month: YearMonthValue) -> Period:
     """
     Validate and normalize a year/month pair.
 
@@ -130,7 +138,7 @@ def find_new_periods(
     processed_periods: Iterable[Period],
 ) -> List[Period]:
     """
-    Return raw periods that are not yet processed.
+    Return raw periods that are not yet fully processed.
 
     Both inputs may contain duplicates. Result is unique and sorted.
     """
@@ -201,14 +209,9 @@ def list_raw_yellow_periods() -> List[Period]:
     return discover_raw_yellow_periods_from_keys(list_raw_yellow_keys())
 
 
-def build_processed_periods_query(
-    table_name: str = "gold_daily_trips",
-) -> str:
+def build_processed_periods_query(table_name: str) -> str:
     """
-    Build ClickHouse query for periods already loaded into the serving layer.
-
-    The daily gold mart is used as the representative processed-period source
-    because it has exactly one grain per pickup_date and contains year/month.
+    Build ClickHouse query for periods loaded into one gold table.
     """
 
     return f"""
@@ -223,11 +226,9 @@ def build_processed_periods_query(
     """
 
 
-def list_processed_clickhouse_periods(
-    table_name: str = "gold_daily_trips",
-) -> List[Period]:
+def list_clickhouse_table_periods(table_name: str) -> List[Period]:
     """
-    List periods already loaded into ClickHouse serving layer.
+    List periods present in one ClickHouse gold table.
     """
 
     rows = fetch_json_data(build_processed_periods_query(table_name))
@@ -240,9 +241,61 @@ def list_processed_clickhouse_periods(
     return sorted(set(periods), key=period_sort_key)
 
 
+def get_fully_processed_periods_from_table_periods(
+    table_periods: Iterable[Iterable[Period]],
+) -> List[Period]:
+    """
+    Return periods that are present in every provided table-period collection.
+
+    This pure helper is used to detect fully processed ClickHouse periods.
+    A period is fully processed only if it exists in all expected gold tables.
+    """
+
+    period_sets: List[Set[Period]] = [
+        {normalize_period(year, month) for year, month in periods}
+        for periods in table_periods
+    ]
+
+    if not period_sets:
+        return []
+
+    fully_processed_periods = set.intersection(*period_sets)
+
+    return sorted(fully_processed_periods, key=period_sort_key)
+
+
+def list_fully_processed_clickhouse_periods(
+    table_names: Sequence[str] = GOLD_CLICKHOUSE_TABLES,
+) -> List[Period]:
+    """
+    List periods fully present in all expected ClickHouse gold tables.
+
+    A period is considered processed only if it exists in every configured
+    ClickHouse gold table. This protects the future new-month DAG from
+    skipping partially loaded months.
+    """
+
+    table_periods = [
+        list_clickhouse_table_periods(table_name)
+        for table_name in table_names
+    ]
+
+    return get_fully_processed_periods_from_table_periods(table_periods)
+
+
+def list_processed_clickhouse_periods() -> List[Period]:
+    """
+    List fully processed periods in ClickHouse.
+
+    Kept as a short public alias for discovery code and CLI usage.
+    """
+
+    return list_fully_processed_clickhouse_periods()
+
+
 def discover_new_raw_periods() -> List[Period]:
     """
-    Discover raw periods that are not yet present in ClickHouse.
+    Discover raw periods that are not yet fully present in ClickHouse.
     """
 
     raw_periods = list_raw_yellow_periods()
@@ -272,7 +325,7 @@ def main() -> None:
     new_periods = find_new_periods(raw_periods, processed_periods)
 
     print(f"Raw periods: {format_periods(raw_periods)}")
-    print(f"Processed ClickHouse periods: {format_periods(processed_periods)}")
+    print(f"Fully processed ClickHouse periods: {format_periods(processed_periods)}")
     print(f"New raw periods: {format_periods(new_periods)}")
 
 

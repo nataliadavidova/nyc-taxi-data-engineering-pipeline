@@ -135,7 +135,7 @@ def test_get_raw_yellow_prefix():
 
 
 def test_build_processed_periods_query():
-    query = discovery.build_processed_periods_query()
+    query = discovery.build_processed_periods_query("gold_daily_trips")
 
     assert "SELECT DISTINCT" in query
     assert "year" in query
@@ -144,7 +144,7 @@ def test_build_processed_periods_query():
     assert "FORMAT JSON" in query
 
 
-def test_list_processed_clickhouse_periods(monkeypatch):
+def test_list_clickhouse_table_periods(monkeypatch):
     monkeypatch.setattr(
         discovery,
         "fetch_json_data",
@@ -155,13 +155,81 @@ def test_list_processed_clickhouse_periods(monkeypatch):
         ],
     )
 
-    assert discovery.list_processed_clickhouse_periods() == [
+    assert discovery.list_clickhouse_table_periods("gold_daily_trips") == [
         ("2024", "01"),
         ("2024", "02"),
     ]
 
 
-def test_discover_new_raw_periods(monkeypatch):
+def test_get_fully_processed_periods_from_table_periods_returns_intersection():
+    table_periods = [
+        [("2024", "01"), ("2024", "02"), ("2025", "01")],
+        [("2024", "01"), ("2024", "02")],
+        [("2024", "01"), ("2024", "02")],
+        [("2024", "01"), ("2024", "02")],
+    ]
+
+    assert discovery.get_fully_processed_periods_from_table_periods(
+        table_periods
+    ) == [
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+
+
+def test_get_fully_processed_periods_excludes_partially_loaded_period():
+    table_periods = [
+        [("2025", "01")],
+        [],
+        [],
+        [],
+    ]
+
+    assert discovery.get_fully_processed_periods_from_table_periods(
+        table_periods
+    ) == []
+
+
+def test_get_fully_processed_periods_handles_empty_table_list():
+    assert discovery.get_fully_processed_periods_from_table_periods([]) == []
+
+
+def test_list_fully_processed_clickhouse_periods_uses_all_tables(monkeypatch):
+    table_periods_by_name = {
+        "gold_daily_trips": [("2024", "01"), ("2024", "02"), ("2025", "01")],
+        "gold_hourly_trips": [("2024", "01"), ("2024", "02")],
+        "gold_payment_type_stats": [("2024", "01"), ("2024", "02")],
+        "gold_location_pair_stats": [("2024", "01"), ("2024", "02")],
+    }
+
+    def fake_list_clickhouse_table_periods(table_name):
+        return table_periods_by_name[table_name]
+
+    monkeypatch.setattr(
+        discovery,
+        "list_clickhouse_table_periods",
+        fake_list_clickhouse_table_periods,
+    )
+
+    assert discovery.list_fully_processed_clickhouse_periods() == [
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+
+
+def test_list_processed_clickhouse_periods_returns_fully_processed_periods(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        discovery,
+        "list_fully_processed_clickhouse_periods",
+        lambda: [("2024", "01")],
+    )
+
+    assert discovery.list_processed_clickhouse_periods() == [("2024", "01")]
+
+
+def test_discover_new_raw_periods_uses_fully_processed_periods(monkeypatch):
     monkeypatch.setattr(
         discovery,
         "list_raw_yellow_periods",
