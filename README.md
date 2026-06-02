@@ -32,8 +32,9 @@ This project demonstrates core data engineering practices:
 - Orchestrated the full pipeline with Apache Airflow, including monthly processing, dependency management, retries, and final quality gates.
 - Added a period refresh Airflow DAG for safe month-level and interval reloads without truncating the entire ClickHouse serving layer.
 - Implemented `replace_period` mode with ClickHouse month deletion, monthly Spark reprocessing, ClickHouse reload, and month-level serving-layer quality checks.
-- Added raw monthly file discovery helpers to identify new Yellow Taxi raw periods by comparing Object Storage files with periods fully loaded into all ClickHouse gold tables. 
-- Added `nyc_taxi_process_new_months_pipeline`, an Airflow DAG that automatically processes newly discovered raw months using dynamic task mapping and a mapped monthly TaskGroup. 
+- Refactored the period refresh DAG to use Airflow runtime Params / Trigger DAG config and a mapped monthly TaskGroup instead of static period constants in the DAG file.
+- Added raw monthly file discovery helpers to identify new Yellow Taxi raw periods by comparing Object Storage files with periods fully loaded into all ClickHouse gold tables.
+- Added `nyc_taxi_process_new_months_pipeline`, an Airflow DAG that automatically processes newly discovered raw months using dynamic task mapping and a mapped monthly TaskGroup.
 - Validated the new-month processing flow on real TLC Yellow Taxi data for `2025-01`; the DAG loaded the month into all ClickHouse gold marts, passed month-level quality checks, and became a successful no-op on the second run.
 - Centralized shared ClickHouse HTTP helpers in `clickhouse_utils.py` to avoid duplicated connection, authentication, timeout, error-handling, and JSON parsing logic across ClickHouse utility jobs.
 - Loaded business-ready gold marts into ClickHouse as an analytical serving layer for fast BI queries.
@@ -114,6 +115,7 @@ nyc_taxi_final_project/
 ├── jobs/
 │   ├── config.py
 │   ├── period_utils.py
+│   ├── period_refresh_config.py
 │   ├── clickhouse_utils.py
 │   ├── raw_discovery.py
 │   ├── bronze_yellow_taxi.py
@@ -139,6 +141,7 @@ nyc_taxi_final_project/
 │   ├── test_config.py
 │   ├── test_dag.py
 │   ├── test_period_utils.py
+│   ├── test_period_refresh_config.py
 │   ├── test_clickhouse_utils.py
 │   ├── test_raw_discovery.py
 │   ├── test_delete_clickhouse_gold_month.py
@@ -748,7 +751,7 @@ Current supported refresh mode:
 replace_period
 ```
 
-In `replace_period` mode, the DAG processes a configured interval of months sequentially. For each selected month, it:
+In `replace_period` mode, the DAG processes a selected interval of months. For each selected month, it:
 
 ```text
 delete selected month from ClickHouse
@@ -775,42 +778,81 @@ load gold marts to ClickHouse
 run ClickHouse month-level quality check
 ```
 
-A one-month reload is handled as a period refresh where the start and end month are the same.
+The period refresh DAG uses Airflow runtime configuration instead of static period constants inside the DAG file.
 
-Example:
+A one-month reload can be triggered with Airflow Trigger DAG config:
 
-```python
-START_YEAR = "2024"
-START_MONTH = "05"
-END_YEAR = "2024"
-END_MONTH = "05"
-REFRESH_MODE = "replace_period"
+```json
+{
+  "start_year": "2024",
+  "start_month": "05",
+  "end_year": "2024",
+  "end_month": "05",
+  "refresh_mode": "replace_period"
+}
 ```
 
-This makes it possible to safely reload only May 2024 without truncating all ClickHouse gold tables.
+This reloads only May 2024 without truncating all ClickHouse gold tables.
 
-The same DAG can also refresh a multi-month interval, for example:
+A multi-month interval refresh can be triggered with:
 
-```python
-START_YEAR = "2024"
-START_MONTH = "01"
-END_YEAR = "2024"
-END_MONTH = "02"
-REFRESH_MODE = "replace_period"
+```json
+{
+  "start_year": "2024",
+  "start_month": "01",
+  "end_year": "2024",
+  "end_month": "02",
+  "refresh_mode": "replace_period"
+}
 ```
 
 This sequentially reloads January and February 2024.
 
-The period refresh DAG has been manually tested in Airflow for:
+The DAG reads the runtime config in:
 
 ```text
-2024-01 → 2024-01
-2024-01 → 2024-02
+read_period_refresh_config
 ```
 
-Both test runs completed successfully in `replace_period` mode.
+Then it generates selected monthly periods and processes them with Airflow dynamic task mapping:
 
-Current implementation uses static period configuration inside the DAG file. Future improvements may move this configuration to Airflow Params or Trigger DAG config with validation.
+```text
+process_month[0]
+process_month[1]
+...
+```
+
+Each mapped `process_month` group runs the full monthly replacement pipeline for one selected period.
+
+Default DAG params are intentionally safe:
+
+```text
+start_year = 2024
+start_month = 01
+end_year = 2024
+end_month = 01
+refresh_mode = replace_period
+```
+
+This prevents an accidental full-year reload when the DAG is triggered without explicit runtime config.
+
+The period refresh config is validated by:
+
+```text
+jobs/period_refresh_config.py
+```
+
+The helper validates:
+
+- supported refresh mode;
+- start and end year/month values;
+- chronological period order;
+- maximum allowed refresh interval;
+- generated period parameters for mapped monthly processing.
+
+The period refresh DAG has been manually tested in Airflow with runtime config for one-month and interval reload scenarios.
+
+Current implementation keeps Spark execution local through the Airflow container for the local Docker setup.
 
 ### New-Month Processing DAG
 
@@ -1121,6 +1163,7 @@ Test files:
 ```text
 tests/test_config.py
 tests/test_period_utils.py
+tests/test_period_refresh_config.py
 tests/test_clickhouse_utils.py
 tests/test_raw_discovery.py
 tests/test_dag.py
@@ -1197,17 +1240,21 @@ This test module validates the period refresh Airflow DAG structure:
 
 - DAG imports without errors;
 - `nyc_taxi_period_refresh_pipeline` DAG exists;
-- `create_clickhouse_gold_tables` task exists;
-- full-rebuild-only tasks such as `truncate_clickhouse_gold_tables` are not used in `replace_period` mode;
-- monthly delete, processing, load, and quality-check tasks exist for the configured period;
-- total task count is correct for the configured full-year interval;
-- `create_clickhouse_gold_tables` runs before the first month delete task;
-- monthly processing starts only after the selected ClickHouse month is deleted;
-- monthly Spark processing dependencies are correct;
-- gold Object Storage schema check runs after all monthly gold marts;
-- ClickHouse load tasks run after the gold schema check;
-- ClickHouse month-level quality check runs after all ClickHouse load tasks;
-- months are processed sequentially.
+- local-safe concurrency settings are configured;
+- runtime DAG params are configured with safe defaults;
+- top-level create-tables, config-read, logging, processing, and finish tasks exist;
+- mapped `process_month` TaskGroup tasks exist;
+- full-rebuild-only tasks such as `truncate_clickhouse_gold_tables` and `check_clickhouse_gold_quality` are not used in `replace_period` mode;
+- old static month-specific task IDs are not used anymore;
+- total task count is correct for the runtime-mapped DAG structure;
+- ClickHouse table creation runs before runtime config reading;
+- config reading runs before logging and monthly processing;
+- monthly processing dependencies inside the mapped TaskGroup are correct;
+- Gold marts run after the Silver quality check;
+- Gold schema check runs after all monthly Gold marts;
+- ClickHouse load tasks run after the Gold schema check;
+- ClickHouse month-level quality check runs after all ClickHouse loads;
+- `finish` uses a no-op-safe trigger rule and runs after logging and monthly processing.
 
 ### `test_process_new_months_dag.py`
 
@@ -1238,6 +1285,22 @@ This test module validates period helper logic:
 - normalization of integer and string year/month values;
 - validation of invalid months;
 - validation that start period is not later than end period.
+
+### `test_period_refresh_config.py`
+
+This test module validates runtime configuration logic for the period refresh DAG:
+
+- reading config values with safe defaults;
+- handling missing, empty, and integer config values;
+- validation of supported refresh modes;
+- rejection of unsupported refresh modes;
+- normalization of selected year/month values;
+- generation of one-month refresh periods;
+- generation of same-year and cross-year refresh intervals;
+- validation of invalid months;
+- validation that start period is not later than end period;
+- safety limit for maximum refresh interval size;
+- formatting selected periods for logs.
 
 ### `test_delete_clickhouse_gold_month.py`
 
@@ -1298,7 +1361,9 @@ Covered quality modules:
 - `check_clickhouse_gold_quality.py`;
 - `check_clickhouse_gold_month_quality.py`;
 - `delete_clickhouse_gold_month.py`;
-- `clickhouse_utils.py`.
+- `clickhouse_utils.py`;
+- `raw_discovery.py`;
+- `period_refresh_config.py`.
 
 The tests validate:
 
@@ -1313,7 +1378,8 @@ The tests validate:
 - ClickHouse month-level quality validation logic;
 - shared ClickHouse HTTP helper behavior, including authentication, response parsing, and error handling;
 - raw monthly file discovery logic for identifying newly arrived data;
-- month-scoped serving-layer validation for safe period refreshes.
+- month-scoped serving-layer validation for safe period refreshes;
+- runtime period refresh config parsing, validation, default values, interval generation, and safety limits.
 
 ### Running Tests
 
@@ -1445,6 +1511,44 @@ For safe month-level or interval refreshes, use the period refresh DAG:
 nyc_taxi_period_refresh_pipeline
 ```
 
+The period refresh DAG accepts runtime configuration through Airflow Params / Trigger DAG config.
+
+Example one-month reload:
+
+```json
+{
+  "start_year": "2024",
+  "start_month": "05",
+  "end_year": "2024",
+  "end_month": "05",
+  "refresh_mode": "replace_period"
+}
+```
+
+Example two-month interval refresh:
+
+```json
+{
+  "start_year": "2024",
+  "start_month": "01",
+  "end_year": "2024",
+  "end_month": "02",
+  "refresh_mode": "replace_period"
+}
+```
+
+Default DAG params are intentionally safe and reload only one month if no explicit runtime config is provided:
+
+```text
+start_year = 2024
+start_month = 01
+end_year = 2024
+end_month = 01
+refresh_mode = replace_period
+```
+
+The period refresh DAG should be used carefully because it deletes selected month data from ClickHouse before reloading it.
+
 For automated processing of newly arrived raw monthly files, use the new-month processing DAG:
 
 ```text
@@ -1452,36 +1556,6 @@ nyc_taxi_process_new_months_pipeline
 ```
 
 This DAG discovers raw Yellow Taxi monthly files in Object Storage and processes only periods that are not yet fully loaded into all ClickHouse gold tables.
-
-Current period refresh configuration is defined inside the DAG file:
-
-```text
-dags/nyc_taxi_period_refresh_pipeline.py
-```
-
-Example one-month reload:
-
-```python
-START_YEAR = "2024"
-START_MONTH = "05"
-END_YEAR = "2024"
-END_MONTH = "05"
-REFRESH_MODE = "replace_period"
-```
-
-Example two-month interval refresh:
-
-```python
-START_YEAR = "2024"
-START_MONTH = "01"
-END_YEAR = "2024"
-END_MONTH = "02"
-REFRESH_MODE = "replace_period"
-```
-
-After changing the configured period, Airflow needs to re-parse the DAG file before the updated graph appears in the UI.
-
-The period refresh DAG should be used carefully because it deletes selected month data from ClickHouse before reloading it.
 
 The new-month processing DAG also deletes a discovered month from ClickHouse before processing it. For a truly new month this removes zero rows. For a partially loaded month, this cleans up inconsistent ClickHouse data before rebuilding and reloading the month.
 
@@ -1563,14 +1637,13 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
-- move period refresh configuration from static DAG constants to Airflow Params or Trigger DAG config with validation;
-- add dynamic task mapping for production-like period refresh runs with runtime parameters;
+- add Airflow Pools for local Spark jobs to prevent multiple Spark-heavy tasks from different DAGs from running at the same time in the local Docker environment;
 - add a protected `full_rebuild` mode to the period refresh DAG or keep it as a separate controlled full-year DAG;
 - add ClickHouse schema migration/versioning using the shared `clickhouse_utils.py` module as the common execution layer;
 - add dbt layer for analytical transformations or document dbt as a future analytical modeling layer;
 - verify Superset dashboard import on a clean Superset instance as a reproducible BI artifact;
 - migrate Spark compute to Yandex Data Proc or another cloud Spark runtime as a separate cloud execution phase;
-- replace local subprocess-based Spark execution in the new-month DAG with production-like job submission to Yandex Data Proc or another managed Spark compute layer, where Airflow only orchestrates, monitors job status, and fails tasks when cloud jobs fail;
+- replace local subprocess-based Spark execution in Airflow DAGs with production-like job submission to Yandex Data Proc or another managed Spark compute layer, where Airflow only orchestrates, monitors job status, and fails tasks when cloud jobs fail;
 - decide whether ClickHouse should remain local for portfolio usage or move to a cloud-hosted serving layer;
 - add Airflow failure callbacks and external notifications, such as Telegram or Slack alerts;
 - add runtime trend monitoring for Airflow tasks and Spark jobs;
