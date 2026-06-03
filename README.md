@@ -43,6 +43,7 @@ This project demonstrates core data engineering practices:
 - Added geospatial enrichment using taxi zone centroid coordinates for pickup and dropoff demand maps.
 - Added automated tests and GitHub Actions CI to validate configuration helpers, DAG imports, Airflow task dependencies, Spark transformation logic, and quality gates.
 - Optimized Spark, Object Storage, quality-check, and ClickHouse load jobs by reducing redundant actions, repeated scans, and unnecessary sorting while keeping pipeline logic unchanged.
+- Added an Airflow spark_pool resource-control layer for Spark-heavy tasks across all pipeline DAGs to prevent multiple local spark-submit jobs from running at the same time in the Docker environment.
 
 ## Business Value
 
@@ -688,6 +689,37 @@ dags/nyc_taxi_pipeline.py
 dags/nyc_taxi_period_refresh_pipeline.py
 dags/nyc_taxi_process_new_months_pipeline.py
 ```
+### Local Spark Resource Control with Airflow Pools
+
+The project uses an Airflow Pool named `spark_pool` to limit concurrent local Spark execution.
+
+All Spark-heavy Airflow tasks that run `spark-submit` are assigned to this pool, including:
+
+- Bronze monthly jobs;
+- Silver monthly jobs;
+- Silver quality checks;
+- Gold mart jobs;
+- Gold Object Storage schema and quality checks;
+- Spark-based ClickHouse load jobs.
+
+In the local Docker environment, the recommended pool configuration is:
+
+```text
+Pool name: spark_pool
+Slots: 1
+Description: Limits concurrent local Spark jobs
+```
+
+This prevents Spark-heavy tasks from different DAGs from running at the same time and overloading the local Docker/Spark environment.
+
+The pool complements DAG-level safety settings such as:
+
+```text
+max_active_runs = 1
+max_active_tasks = 1
+```
+
+`max_active_runs` and `max_active_tasks` keep individual DAG runs sequential, while `spark_pool` provides cross-DAG Spark resource control.
 
 ### Full-Year Pipeline DAG
 
@@ -955,6 +987,8 @@ max_active_tasks = 1
 ```
 
 These settings keep Spark jobs sequential and safe for local Docker execution.
+
+Spark-heavy tasks in this DAG also use the shared Airflow `spark_pool`, which prevents Spark jobs from this DAG and other NYC Taxi DAGs from running at the same time in the local environment.
 
 The new-month DAG was validated on real TLC Yellow Taxi data for:
 
@@ -1232,6 +1266,8 @@ This test module validates Airflow orchestration logic:
 - monthly processing order is preserved;
 - gold tasks run before ClickHouse load tasks;
 - gold Object Storage quality check runs after all monthly gold marts and before ClickHouse load tasks;
+- Spark-heavy tasks use the shared Airflow `spark_pool`;
+- lightweight ClickHouse service tasks do not use the Spark pool;
 - final ClickHouse gold quality check runs after all December load tasks.
 
 ### `test_period_refresh_dag.py`
@@ -1254,7 +1290,9 @@ This test module validates the period refresh Airflow DAG structure:
 - Gold schema check runs after all monthly Gold marts;
 - ClickHouse load tasks run after the Gold schema check;
 - ClickHouse month-level quality check runs after all ClickHouse loads;
-- `finish` uses a no-op-safe trigger rule and runs after logging and monthly processing.
+- `finish` uses a no-op-safe trigger rule and runs after logging and monthly processing;
+- Spark-heavy mapped TaskGroup tasks use the shared Airflow `spark_pool`;
+- non-Spark tasks remain outside the Spark pool.
 
 ### `test_process_new_months_dag.py`
 
@@ -1273,7 +1311,9 @@ This test module validates the new-month processing Airflow DAG structure:
 - Gold schema check runs after all monthly Gold marts;
 - ClickHouse load tasks run after the Gold schema check;
 - ClickHouse month-level quality check runs after all ClickHouse loads;
-- `finish` uses a no-op-safe trigger rule and runs after logging and monthly processing.
+- `finish` uses a no-op-safe trigger rule and runs after logging and monthly processing;
+- Spark-heavy mapped TaskGroup tasks use the shared Airflow `spark_pool`;
+- discovery, logging, ClickHouse cleanup, month-level quality, and finish tasks remain outside the Spark pool.
 
 ### `test_period_utils.py`
 
@@ -1637,7 +1677,6 @@ Data → Datasets → Edit dataset → Columns → Sync columns from source → 
 
 Possible future improvements:
 
-- add Airflow Pools for local Spark jobs to prevent multiple Spark-heavy tasks from different DAGs from running at the same time in the local Docker environment;
 - add a protected `full_rebuild` mode to the period refresh DAG or keep it as a separate controlled full-year DAG;
 - add ClickHouse schema migration/versioning using the shared `clickhouse_utils.py` module as the common execution layer;
 - add dbt layer for analytical transformations or document dbt as a future analytical modeling layer;

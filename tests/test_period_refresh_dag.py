@@ -16,6 +16,7 @@ JOBS_DIR = PROJECT_ROOT / "jobs"
 sys.path.insert(0, str(JOBS_DIR))
 
 CONFIG_TASK_ID = "read_period_refresh_config"
+SPARK_POOL = "spark_pool"
 
 
 def mapped_task_upstreams(*business_upstream_task_ids):
@@ -247,3 +248,43 @@ def test_finish_runs_after_logging_and_month_processing(period_refresh_dag):
     }
 
     assert finish.upstream_task_ids == expected_upstream
+
+
+def test_period_refresh_spark_tasks_use_spark_pool(period_refresh_dag):
+    spark_task_ids = [
+        "process_month.bronze_yellow_taxi",
+        "process_month.silver_yellow_taxi",
+        "process_month.check_yellow_taxi_quality",
+        "process_month.gold_daily_trips",
+        "process_month.gold_hourly_trips",
+        "process_month.gold_payment_type_stats",
+        "process_month.gold_location_pair_stats",
+        "process_month.check_gold_schema",
+        "process_month.load_gold_daily_trips_to_clickhouse",
+        "process_month.load_gold_hourly_trips_to_clickhouse",
+        "process_month.load_gold_payment_type_stats_to_clickhouse",
+        "process_month.load_gold_location_pair_stats_to_clickhouse",
+    ]
+
+    for task_id in spark_task_ids:
+        task = period_refresh_dag.get_task(task_id)
+
+        assert task.pool == SPARK_POOL
+
+
+def test_period_refresh_non_spark_tasks_do_not_use_spark_pool(
+    period_refresh_dag,
+):
+    non_spark_task_ids = [
+        "create_clickhouse_gold_tables",
+        "read_period_refresh_config",
+        "log_period_refresh_periods",
+        "process_month.delete_clickhouse_gold_month",
+        "process_month.check_clickhouse_gold_month_quality",
+        "finish",
+    ]
+
+    for task_id in non_spark_task_ids:
+        task = period_refresh_dag.get_task(task_id)
+
+        assert task.pool != SPARK_POOL
