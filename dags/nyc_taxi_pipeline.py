@@ -10,12 +10,21 @@ bronze
 → load_gold_daily / load_gold_hourly / load_gold_payment / load_gold_location
 """
 
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from airflow import DAG
 from airflow.operators.bash import BashOperator
 
-from config import AIRFLOW_JOBS_DIR, AIRFLOW_PROJECT_DIR, S3_ENDPOINT
+from config import (
+    AIRFLOW_JOBS_DIR,
+    AIRFLOW_PROJECT_DIR,
+    AIRFLOW_RETRY_DELAY_MINUTES,
+    PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES,
+    S3_ENDPOINT,
+    SPARK_TASK_EXECUTION_TIMEOUT_MINUTES,
+)
+
+from airflow_callbacks import airflow_failure_callback
 
 
 PROJECT_DIR = AIRFLOW_PROJECT_DIR
@@ -41,9 +50,19 @@ SPARK_SUBMIT_OPTIONS_WITH_CLICKHOUSE = (
 
 SPARK_POOL = "spark_pool"
 
+AIRFLOW_RETRY_DELAY = timedelta(minutes=AIRFLOW_RETRY_DELAY_MINUTES)
+SPARK_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=SPARK_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+
 default_args = {
     "owner": "natalia",
     "retries": 1,
+    "retry_delay": AIRFLOW_RETRY_DELAY,
+    "on_failure_callback": airflow_failure_callback,
 }
 
 
@@ -55,6 +74,7 @@ def spark_task(task_id: str, job_file: str, month: str) -> BashOperator:
         PYTHONPATH={JOBS_DIR} {SPARK_SUBMIT_BASE} jobs/{job_file} --year {YEAR} --month {month}
         """,
         pool=SPARK_POOL,
+        execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,
     )
 
 
@@ -69,6 +89,7 @@ def clickhouse_load_task(task_id: str, job_file: str, month: str) -> BashOperato
         --month {month}
         """,
         pool=SPARK_POOL,
+        execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,
     )
 
 
@@ -87,6 +108,7 @@ with DAG(
         cd {PROJECT_DIR} &&
         PYTHONPATH={JOBS_DIR} python jobs/create_clickhouse_gold_tables.py
         """,
+        execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
     )
 
     truncate_clickhouse_gold_tables = BashOperator(
@@ -95,6 +117,7 @@ with DAG(
         cd {PROJECT_DIR} && \
         PYTHONPATH={JOBS_DIR} python jobs/truncate_clickhouse_gold_tables.py
         """,
+        execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
     )
 
     check_clickhouse_gold_quality = BashOperator(
@@ -103,6 +126,7 @@ with DAG(
         cd {PROJECT_DIR} &&
         PYTHONPATH={JOBS_DIR} python jobs/check_clickhouse_gold_quality.py
         """,
+        execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
     )
 
     create_clickhouse_gold_tables >> truncate_clickhouse_gold_tables

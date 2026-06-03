@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import shlex
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List
 
 from airflow import DAG
@@ -42,8 +42,16 @@ from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
 
-from config import AIRFLOW_JOBS_DIR, AIRFLOW_PROJECT_DIR, S3_ENDPOINT
+from config import (
+    AIRFLOW_JOBS_DIR,
+    AIRFLOW_PROJECT_DIR,
+    AIRFLOW_RETRY_DELAY_MINUTES,
+    PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES,
+    S3_ENDPOINT,
+    SPARK_TASK_EXECUTION_TIMEOUT_MINUTES,
+)
 
+from airflow_callbacks import airflow_failure_callback
 
 PROJECT_DIR = AIRFLOW_PROJECT_DIR
 JOBS_DIR = AIRFLOW_JOBS_DIR
@@ -65,9 +73,19 @@ SPARK_SUBMIT_OPTIONS_WITH_CLICKHOUSE = (
 
 SPARK_POOL = "spark_pool"
 
+AIRFLOW_RETRY_DELAY = timedelta(minutes=AIRFLOW_RETRY_DELAY_MINUTES)
+SPARK_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=SPARK_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+
 default_args = {
     "owner": "natalia",
     "retries": 1,
+    "retry_delay": AIRFLOW_RETRY_DELAY,
+    "on_failure_callback": airflow_failure_callback,
 }
 
 DiscoveredPeriod = Dict[str, str]
@@ -179,7 +197,7 @@ def build_clickhouse_load_command(
     )
 
 
-@task(task_id="discover_new_raw_periods")
+@task(task_id="discover_new_raw_periods", execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,)
 def discover_new_raw_periods_task() -> List[DiscoveredPeriod]:
     """
     Discover new raw periods and return dictionaries for mapped TaskGroup runs.
@@ -206,7 +224,7 @@ def discover_new_raw_periods_task() -> List[DiscoveredPeriod]:
     ]
 
 
-@task(task_id="log_discovered_periods")
+@task(task_id="log_discovered_periods", execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,)
 def log_discovered_periods(discovered_periods: List[DiscoveredPeriod]) -> None:
     """
     Log discovered periods.
@@ -248,7 +266,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
         -> ClickHouse month quality
     """
 
-    @task(task_id="delete_clickhouse_gold_month")
+    @task(task_id="delete_clickhouse_gold_month", execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,)
     def delete_clickhouse_gold_month_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_python_job_command(
@@ -257,7 +275,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="bronze_yellow_taxi", pool=SPARK_POOL)
+    @task(task_id="bronze_yellow_taxi", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def bronze_yellow_taxi_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -266,7 +284,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="silver_yellow_taxi", pool=SPARK_POOL)
+    @task(task_id="silver_yellow_taxi", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def silver_yellow_taxi_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -275,7 +293,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="check_yellow_taxi_quality", pool=SPARK_POOL)
+    @task(task_id="check_yellow_taxi_quality", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def check_yellow_taxi_quality_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -284,7 +302,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_hourly_trips", pool=SPARK_POOL)
+    @task(task_id="gold_hourly_trips", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def gold_hourly_trips_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -293,7 +311,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_daily_trips", pool=SPARK_POOL)
+    @task(task_id="gold_daily_trips", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def gold_daily_trips_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -302,7 +320,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_payment_type_stats", pool=SPARK_POOL)
+    @task(task_id="gold_payment_type_stats", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def gold_payment_type_stats_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -311,7 +329,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_location_pair_stats", pool=SPARK_POOL)
+    @task(task_id="gold_location_pair_stats", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def gold_location_pair_stats_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -320,7 +338,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="check_gold_schema", pool=SPARK_POOL)
+    @task(task_id="check_gold_schema", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def check_gold_schema_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -329,7 +347,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_hourly_trips_to_clickhouse", pool=SPARK_POOL)
+    @task(task_id="load_gold_hourly_trips_to_clickhouse", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def load_gold_hourly_trips_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -340,7 +358,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_daily_trips_to_clickhouse", pool=SPARK_POOL)
+    @task(task_id="load_gold_daily_trips_to_clickhouse", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def load_gold_daily_trips_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -351,7 +369,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_payment_type_stats_to_clickhouse", pool=SPARK_POOL)
+    @task(task_id="load_gold_payment_type_stats_to_clickhouse", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def load_gold_payment_type_stats_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -362,7 +380,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_location_pair_stats_to_clickhouse", pool=SPARK_POOL)
+    @task(task_id="load_gold_location_pair_stats_to_clickhouse", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
     def load_gold_location_pair_stats_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -373,7 +391,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="check_clickhouse_gold_month_quality")
+    @task(task_id="check_clickhouse_gold_month_quality", execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,)
     def check_clickhouse_gold_month_quality_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -464,6 +482,7 @@ with DAG(
         cd {PROJECT_DIR} &&
         PYTHONPATH={JOBS_DIR} python jobs/create_clickhouse_gold_tables.py
         """,
+        execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
     )
 
     discovered_periods = discover_new_raw_periods_task()

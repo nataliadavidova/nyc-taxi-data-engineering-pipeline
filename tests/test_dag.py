@@ -1,4 +1,5 @@
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -14,7 +15,13 @@ JOBS_DIR = PROJECT_ROOT / "jobs"
 
 SPARK_POOL = "spark_pool"
 
+AIRFLOW_RETRY_DELAY = timedelta(minutes=5)
+SPARK_TASK_EXECUTION_TIMEOUT = timedelta(minutes=30)
+PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
+
 sys.path.insert(0, str(JOBS_DIR))
+
+from airflow_callbacks import airflow_failure_callback
 
 
 @pytest.fixture(scope="module")
@@ -211,3 +218,48 @@ def test_clickhouse_service_tasks_do_not_use_spark_pool(nyc_taxi_dag):
         task = nyc_taxi_dag.get_task(task_id)
 
         assert task.pool != SPARK_POOL
+
+
+def test_dag_tasks_use_failure_callback_and_retry_delay(nyc_taxi_dag):
+    for task in nyc_taxi_dag.tasks:
+        assert task.retries == 1
+        assert task.retry_delay == AIRFLOW_RETRY_DELAY
+        assert task.on_failure_callback == airflow_failure_callback
+
+
+def test_spark_tasks_use_spark_execution_timeout(nyc_taxi_dag):
+    spark_task_prefixes = [
+        "bronze_yellow_taxi",
+        "silver_yellow_taxi",
+        "check_yellow_taxi_quality",
+        "gold_daily_trips",
+        "gold_hourly_trips",
+        "gold_payment_type_stats",
+        "gold_location_pair_stats",
+        "check_gold_schema",
+        "load_gold_daily_trips_to_clickhouse",
+        "load_gold_hourly_trips_to_clickhouse",
+        "load_gold_payment_type_stats_to_clickhouse",
+        "load_gold_location_pair_stats_to_clickhouse",
+    ]
+
+    months = [f"{month:02d}" for month in range(1, 13)]
+
+    for month in months:
+        for task_prefix in spark_task_prefixes:
+            task = nyc_taxi_dag.get_task(f"{task_prefix}_2024_{month}")
+
+            assert task.execution_timeout == SPARK_TASK_EXECUTION_TIMEOUT
+
+
+def test_clickhouse_service_tasks_use_python_execution_timeout(nyc_taxi_dag):
+    service_task_ids = [
+        "create_clickhouse_gold_tables",
+        "truncate_clickhouse_gold_tables",
+        "check_clickhouse_gold_quality",
+    ]
+
+    for task_id in service_task_ids:
+        task = nyc_taxi_dag.get_task(task_id)
+
+        assert task.execution_timeout == PYTHON_TASK_EXECUTION_TIMEOUT

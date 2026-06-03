@@ -44,6 +44,7 @@ This project demonstrates core data engineering practices:
 - Added automated tests and GitHub Actions CI to validate configuration helpers, DAG imports, Airflow task dependencies, Spark transformation logic, and quality gates.
 - Optimized Spark, Object Storage, quality-check, and ClickHouse load jobs by reducing redundant actions, repeated scans, and unnecessary sorting while keeping pipeline logic unchanged.
 - Added an Airflow spark_pool resource-control layer for Spark-heavy tasks across all pipeline DAGs to prevent multiple local spark-submit jobs from running at the same time in the Docker environment.
+- Added Airflow task hardening with centralized retry delay, execution timeouts for Spark-heavy and lightweight tasks, and a shared failure callback that writes structured failure messages to Airflow task logs.
 
 ## Business Value
 
@@ -118,6 +119,7 @@ nyc_taxi_final_project/
 │   ├── period_utils.py
 │   ├── period_refresh_config.py
 │   ├── clickhouse_utils.py
+│   ├── airflow_callbacks.py
 │   ├── raw_discovery.py
 │   ├── bronze_yellow_taxi.py
 │   ├── silver_yellow_taxi.py
@@ -140,6 +142,7 @@ nyc_taxi_final_project/
 │   └── run_clickhouse_sql_file.py
 ├── tests/
 │   ├── test_config.py
+│   ├── test_airflow_callbacks.py
 │   ├── test_dag.py
 │   ├── test_period_utils.py
 │   ├── test_period_refresh_config.py
@@ -721,6 +724,39 @@ max_active_tasks = 1
 
 `max_active_runs` and `max_active_tasks` keep individual DAG runs sequential, while `spark_pool` provides cross-DAG Spark resource control.
 
+### Airflow Task Hardening and Failure Callbacks
+
+The project also includes a basic Airflow task hardening layer for local production-like reliability.
+
+All NYC Taxi DAGs use centralized Airflow runtime settings for:
+
+- retry delay;
+- Spark task execution timeout;
+- lightweight Python/ClickHouse task execution timeout;
+- shared task failure callback.
+
+Default runtime settings are defined in `jobs/config.py`:
+
+```text
+AIRFLOW_RETRY_DELAY_MINUTES = 5
+SPARK_TASK_EXECUTION_TIMEOUT_MINUTES = 30
+PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES = 10
+```
+
+These values can be overridden through environment variables if needed.
+
+Spark-heavy tasks use the Spark execution timeout. This includes Bronze, Silver, Silver quality, Gold mart, Gold Object Storage schema/quality, and Spark-based ClickHouse load tasks.
+
+Lightweight Python/ClickHouse service tasks use the Python execution timeout. This includes ClickHouse table creation, truncation, month deletion, runtime config reading, raw period discovery, logging tasks, and ClickHouse quality checks.
+
+Each DAG also uses a shared Airflow failure callback:
+```
+jobs/airflow_callbacks.py
+```
+The callback builds a structured failure message with the DAG ID, task ID, run ID, try number, logical date, log URL, and exception details.
+
+At the current stage, the callback writes this message to Airflow task logs. This creates a reusable foundation for future Telegram, Slack, email, or webhook-based alerting.
+
 ### Full-Year Pipeline DAG
 
 The main full-year pipeline DAG is:
@@ -1196,6 +1232,7 @@ Test files:
 
 ```text
 tests/test_config.py
+tests/test_airflow_callbacks.py
 tests/test_period_utils.py
 tests/test_period_refresh_config.py
 tests/test_clickhouse_utils.py
@@ -1222,7 +1259,20 @@ This test module validates project configuration logic:
 - monthly date boundary calculation;
 - S3/Object Storage path helpers;
 - raw, bronze, silver, quality, bad records, and gold layer paths;
-- taxi zone lookup path.
+- taxi zone lookup path;
+- Airflow retry delay default setting;
+- Spark task execution timeout default setting;
+- Python/lightweight task execution timeout default setting.
+
+### `test_airflow_callbacks.py`
+
+This test module validates shared Airflow failure callback logic:
+
+- safe value extraction from Airflow callback context dictionaries;
+- safe attribute extraction from Airflow objects;
+- structured failure alert message generation;
+- fallback behavior when optional Airflow context fields are missing;
+- callback output to task logs.
 
 ### `test_clickhouse_utils.py`
 
@@ -1268,7 +1318,11 @@ This test module validates Airflow orchestration logic:
 - gold Object Storage quality check runs after all monthly gold marts and before ClickHouse load tasks;
 - Spark-heavy tasks use the shared Airflow `spark_pool`;
 - lightweight ClickHouse service tasks do not use the Spark pool;
-- final ClickHouse gold quality check runs after all December load tasks.
+- final ClickHouse gold quality check runs after all December load tasks;
+- all tasks use the shared Airflow failure callback;
+- all tasks use the configured retry delay;
+- Spark-heavy tasks use the configured Spark execution timeout;
+- lightweight ClickHouse service tasks use the configured Python execution timeout.
 
 ### `test_period_refresh_dag.py`
 
@@ -1292,7 +1346,11 @@ This test module validates the period refresh Airflow DAG structure:
 - ClickHouse month-level quality check runs after all ClickHouse loads;
 - `finish` uses a no-op-safe trigger rule and runs after logging and monthly processing;
 - Spark-heavy mapped TaskGroup tasks use the shared Airflow `spark_pool`;
-- non-Spark tasks remain outside the Spark pool.
+- non-Spark tasks remain outside the Spark pool;
+- all tasks use the shared Airflow failure callback;
+- all tasks use the configured retry delay;
+- Spark-heavy mapped TaskGroup tasks use the configured Spark execution timeout;
+- non-Spark processing tasks use the configured Python execution timeout.
 
 ### `test_process_new_months_dag.py`
 
@@ -1313,7 +1371,11 @@ This test module validates the new-month processing Airflow DAG structure:
 - ClickHouse month-level quality check runs after all ClickHouse loads;
 - `finish` uses a no-op-safe trigger rule and runs after logging and monthly processing;
 - Spark-heavy mapped TaskGroup tasks use the shared Airflow `spark_pool`;
-- discovery, logging, ClickHouse cleanup, month-level quality, and finish tasks remain outside the Spark pool.
+- discovery, logging, ClickHouse cleanup, month-level quality, and finish tasks remain outside the Spark pool;
+- all tasks use the shared Airflow failure callback;
+- all tasks use the configured retry delay;
+- Spark-heavy mapped TaskGroup tasks use the configured Spark execution timeout;
+- discovery, logging, ClickHouse cleanup, and month-level quality tasks use the configured Python execution timeout.
 
 ### `test_period_utils.py`
 
@@ -1500,8 +1562,17 @@ The production-like monitoring and alerting strategy is documented in:
 ```text
 docs/monitoring_plan.md
 ```
-
 The plan includes Airflow DAG monitoring, Spark task runtime SLA thresholds, Silver and Gold data quality checks, ClickHouse serving-layer validation, Superset dashboard monitoring, and incident response guidelines.
+
+Part of the monitoring strategy is already implemented in the Airflow layer:
+
+- all DAGs use explicit retry delay;
+- Spark-heavy tasks have execution timeouts to prevent long-running or hanging Spark jobs;
+- lightweight Python/ClickHouse tasks have execution timeouts;
+- all DAGs use a shared failure callback;
+- failure callback messages are written to Airflow task logs in a structured format.
+
+The current failure callback is intentionally transport-agnostic. External notifications such as Telegram or Slack can be added later on top of the same callback message builder.
 
 ## How to Run Locally
 
@@ -1684,7 +1755,8 @@ Possible future improvements:
 - migrate Spark compute to Yandex Data Proc or another cloud Spark runtime as a separate cloud execution phase;
 - replace local subprocess-based Spark execution in Airflow DAGs with production-like job submission to Yandex Data Proc or another managed Spark compute layer, where Airflow only orchestrates, monitors job status, and fails tasks when cloud jobs fail;
 - decide whether ClickHouse should remain local for portfolio usage or move to a cloud-hosted serving layer;
-- add Airflow failure callbacks and external notifications, such as Telegram or Slack alerts;
+- add external notifications, such as Telegram or Slack alerts, on top of the existing Airflow failure callback;
+- add task-family-specific Airflow execution timeouts based on the SLA thresholds documented in `docs/monitoring_plan.md`;
 - add runtime trend monitoring for Airflow tasks and Spark jobs;
 - add Prometheus, Grafana, and Alertmanager for infrastructure and pipeline observability if the project is deployed as a longer-running environment;
 - add taxi zone polygon-based choropleth maps instead of centroid-based point maps;

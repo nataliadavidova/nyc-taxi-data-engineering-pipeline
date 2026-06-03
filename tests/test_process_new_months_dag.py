@@ -1,4 +1,5 @@
 import sys
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ JOBS_DIR = PROJECT_ROOT / "jobs"
 
 sys.path.insert(0, str(JOBS_DIR))
 
+from airflow_callbacks import airflow_failure_callback
 
 @pytest.fixture(scope="module")
 def dagbag():
@@ -31,6 +33,9 @@ def process_new_months_dag(dagbag):
 
 DISCOVERY_TASK_ID = "discover_new_raw_periods"
 SPARK_POOL = "spark_pool"
+AIRFLOW_RETRY_DELAY = timedelta(minutes=5)
+SPARK_TASK_EXECUTION_TIMEOUT = timedelta(minutes=30)
+PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
 
 def mapped_task_upstreams(*business_upstream_task_ids):
     """
@@ -243,3 +248,53 @@ def test_process_new_months_non_spark_tasks_do_not_use_spark_pool(
         task = process_new_months_dag.get_task(task_id)
 
         assert task.pool != SPARK_POOL
+
+
+def test_process_new_months_tasks_use_failure_callback_and_retry_delay(
+    process_new_months_dag,
+):
+    for task in process_new_months_dag.tasks:
+        assert task.retries == 1
+        assert task.retry_delay == AIRFLOW_RETRY_DELAY
+        assert task.on_failure_callback == airflow_failure_callback
+
+
+def test_process_new_months_spark_tasks_use_spark_execution_timeout(
+    process_new_months_dag,
+):
+    spark_task_ids = [
+        "process_month.bronze_yellow_taxi",
+        "process_month.silver_yellow_taxi",
+        "process_month.check_yellow_taxi_quality",
+        "process_month.gold_daily_trips",
+        "process_month.gold_hourly_trips",
+        "process_month.gold_payment_type_stats",
+        "process_month.gold_location_pair_stats",
+        "process_month.check_gold_schema",
+        "process_month.load_gold_daily_trips_to_clickhouse",
+        "process_month.load_gold_hourly_trips_to_clickhouse",
+        "process_month.load_gold_payment_type_stats_to_clickhouse",
+        "process_month.load_gold_location_pair_stats_to_clickhouse",
+    ]
+
+    for task_id in spark_task_ids:
+        task = process_new_months_dag.get_task(task_id)
+
+        assert task.execution_timeout == SPARK_TASK_EXECUTION_TIMEOUT
+
+
+def test_process_new_months_non_spark_tasks_use_python_execution_timeout(
+    process_new_months_dag,
+):
+    non_spark_task_ids = [
+        "create_clickhouse_gold_tables",
+        "discover_new_raw_periods",
+        "log_discovered_periods",
+        "process_month.delete_clickhouse_gold_month",
+        "process_month.check_clickhouse_gold_month_quality",
+    ]
+
+    for task_id in non_spark_task_ids:
+        task = process_new_months_dag.get_task(task_id)
+
+        assert task.execution_timeout == PYTHON_TASK_EXECUTION_TIMEOUT
