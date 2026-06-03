@@ -21,6 +21,16 @@ load_dotenv()
 AIRFLOW_PROJECT_DIR = os.getenv("AIRFLOW_PROJECT_DIR", "/opt/airflow")
 AIRFLOW_JOBS_DIR = f"{AIRFLOW_PROJECT_DIR}/jobs"
 
+AIRFLOW_RETRY_DELAY_MINUTES = int(
+    os.getenv("AIRFLOW_RETRY_DELAY_MINUTES", "5")
+)
+SPARK_TASK_EXECUTION_TIMEOUT_MINUTES = int(
+    os.getenv("SPARK_TASK_EXECUTION_TIMEOUT_MINUTES", "30")
+)
+PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES = int(
+    os.getenv("PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES", "10")
+)
+
 
 # =========================
 # Object Storage settings

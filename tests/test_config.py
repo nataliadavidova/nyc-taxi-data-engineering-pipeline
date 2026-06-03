@@ -110,3 +110,9 @@ def test_taxi_zone_lookup_path():
     assert path == (
         f"s3a://{config.BUCKET_NAME}/nyc_taxi/raw/lookup/taxi_zone_lookup.csv"
     )
+
+
+def test_airflow_runtime_settings_defaults():
+    assert config.AIRFLOW_RETRY_DELAY_MINUTES == 5
+    assert config.SPARK_TASK_EXECUTION_TIMEOUT_MINUTES == 30
+    assert config.PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES == 10
