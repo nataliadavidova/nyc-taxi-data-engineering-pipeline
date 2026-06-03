@@ -39,6 +39,7 @@ SPARK_SUBMIT_OPTIONS_WITH_CLICKHOUSE = (
     "com.clickhouse:clickhouse-jdbc:0.6.0"
 )
 
+SPARK_POOL = "spark_pool"
 
 default_args = {
     "owner": "natalia",
@@ -53,6 +54,7 @@ def spark_task(task_id: str, job_file: str, month: str) -> BashOperator:
         cd {PROJECT_DIR} && \
         PYTHONPATH={JOBS_DIR} {SPARK_SUBMIT_BASE} jobs/{job_file} --year {YEAR} --month {month}
         """,
+        pool=SPARK_POOL,
     )
 
 
@@ -66,6 +68,7 @@ def clickhouse_load_task(task_id: str, job_file: str, month: str) -> BashOperato
         --year {YEAR} \
         --month {month}
         """,
+        pool=SPARK_POOL,
     )
 
 

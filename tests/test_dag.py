@@ -12,6 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DAGS_DIR = PROJECT_ROOT / "dags"
 JOBS_DIR = PROJECT_ROOT / "jobs"
 
+SPARK_POOL = "spark_pool"
+
 sys.path.insert(0, str(JOBS_DIR))
 
 
@@ -171,3 +173,41 @@ def test_december_loads_run_before_clickhouse_gold_quality_check(nyc_taxi_dag):
     }
 
     assert quality_check.upstream_task_ids == expected_upstream_tasks
+
+
+def test_spark_tasks_use_spark_pool(nyc_taxi_dag):
+    spark_task_prefixes = [
+        "bronze_yellow_taxi",
+        "silver_yellow_taxi",
+        "check_yellow_taxi_quality",
+        "gold_daily_trips",
+        "gold_hourly_trips",
+        "gold_payment_type_stats",
+        "gold_location_pair_stats",
+        "check_gold_schema",
+        "load_gold_daily_trips_to_clickhouse",
+        "load_gold_hourly_trips_to_clickhouse",
+        "load_gold_payment_type_stats_to_clickhouse",
+        "load_gold_location_pair_stats_to_clickhouse",
+    ]
+
+    months = [f"{month:02d}" for month in range(1, 13)]
+
+    for month in months:
+        for task_prefix in spark_task_prefixes:
+            task = nyc_taxi_dag.get_task(f"{task_prefix}_2024_{month}")
+
+            assert task.pool == SPARK_POOL
+
+
+def test_clickhouse_service_tasks_do_not_use_spark_pool(nyc_taxi_dag):
+    service_task_ids = [
+        "create_clickhouse_gold_tables",
+        "truncate_clickhouse_gold_tables",
+        "check_clickhouse_gold_quality",
+    ]
+
+    for task_id in service_task_ids:
+        task = nyc_taxi_dag.get_task(task_id)
+
+        assert task.pool != SPARK_POOL
