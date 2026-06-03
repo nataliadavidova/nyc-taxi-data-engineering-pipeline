@@ -23,8 +23,10 @@ Safety:
     before rebuilding and reloading the month.
 
 Local execution note:
-    max_active_runs=1 and max_active_tasks=1 keep processing sequential and
-    safe for local Docker/Spark execution.
+    max_active_runs=1 and max_active_tasks=1 keep this DAG sequential.
+    Spark-heavy tasks also use the spark_pool Airflow Pool to prevent Spark jobs
+    from different DAGs from running at the same time in the local Docker
+    environment.
 """
 
 from __future__ import annotations
@@ -61,6 +63,7 @@ SPARK_SUBMIT_OPTIONS_WITH_CLICKHOUSE = (
     "com.clickhouse:clickhouse-jdbc:0.6.0"
 )
 
+SPARK_POOL = "spark_pool"
 
 default_args = {
     "owner": "natalia",
@@ -254,7 +257,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="bronze_yellow_taxi")
+    @task(task_id="bronze_yellow_taxi", pool=SPARK_POOL)
     def bronze_yellow_taxi_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -263,7 +266,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="silver_yellow_taxi")
+    @task(task_id="silver_yellow_taxi", pool=SPARK_POOL)
     def silver_yellow_taxi_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -272,7 +275,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="check_yellow_taxi_quality")
+    @task(task_id="check_yellow_taxi_quality", pool=SPARK_POOL)
     def check_yellow_taxi_quality_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -281,7 +284,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_hourly_trips")
+    @task(task_id="gold_hourly_trips", pool=SPARK_POOL)
     def gold_hourly_trips_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -290,7 +293,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_daily_trips")
+    @task(task_id="gold_daily_trips", pool=SPARK_POOL)
     def gold_daily_trips_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -299,7 +302,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_payment_type_stats")
+    @task(task_id="gold_payment_type_stats", pool=SPARK_POOL)
     def gold_payment_type_stats_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -308,7 +311,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_location_pair_stats")
+    @task(task_id="gold_location_pair_stats", pool=SPARK_POOL)
     def gold_location_pair_stats_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -317,7 +320,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="check_gold_schema")
+    @task(task_id="check_gold_schema", pool=SPARK_POOL)
     def check_gold_schema_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -326,7 +329,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_hourly_trips_to_clickhouse")
+    @task(task_id="load_gold_hourly_trips_to_clickhouse", pool=SPARK_POOL)
     def load_gold_hourly_trips_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -337,7 +340,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_daily_trips_to_clickhouse")
+    @task(task_id="load_gold_daily_trips_to_clickhouse", pool=SPARK_POOL)
     def load_gold_daily_trips_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -348,7 +351,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_payment_type_stats_to_clickhouse")
+    @task(task_id="load_gold_payment_type_stats_to_clickhouse", pool=SPARK_POOL)
     def load_gold_payment_type_stats_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -359,7 +362,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_location_pair_stats_to_clickhouse")
+    @task(task_id="load_gold_location_pair_stats_to_clickhouse", pool=SPARK_POOL)
     def load_gold_location_pair_stats_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
