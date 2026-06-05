@@ -1,3 +1,4 @@
+import importlib
 import sys
 from pathlib import Path
 
@@ -116,3 +117,31 @@ def test_airflow_runtime_settings_defaults():
     assert config.AIRFLOW_RETRY_DELAY_MINUTES == 5
     assert config.SPARK_TASK_EXECUTION_TIMEOUT_MINUTES == 30
     assert config.PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES == 10
+
+
+def test_telegram_alerting_settings_defaults(monkeypatch):
+    monkeypatch.delenv("TELEGRAM_ALERTS_ENABLED", raising=False)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    monkeypatch.delenv("TELEGRAM_API_TIMEOUT_SECONDS", raising=False)
+
+    reloaded_config = importlib.reload(config)
+
+    assert reloaded_config.TELEGRAM_ALERTS_ENABLED is False
+    assert reloaded_config.TELEGRAM_BOT_TOKEN is None
+    assert reloaded_config.TELEGRAM_CHAT_ID is None
+    assert reloaded_config.TELEGRAM_API_TIMEOUT_SECONDS == 10
+
+
+def test_telegram_alerting_settings_from_env(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_ALERTS_ENABLED", "true")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "test-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "test-chat-id")
+    monkeypatch.setenv("TELEGRAM_API_TIMEOUT_SECONDS", "15")
+
+    reloaded_config = importlib.reload(config)
+
+    assert reloaded_config.TELEGRAM_ALERTS_ENABLED is True
+    assert reloaded_config.TELEGRAM_BOT_TOKEN == "test-token"
+    assert reloaded_config.TELEGRAM_CHAT_ID == "test-chat-id"
+    assert reloaded_config.TELEGRAM_API_TIMEOUT_SECONDS == 15
