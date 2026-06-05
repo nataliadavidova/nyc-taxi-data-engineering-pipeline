@@ -45,6 +45,7 @@ This project demonstrates core data engineering practices:
 - Optimized Spark, Object Storage, quality-check, and ClickHouse load jobs by reducing redundant actions, repeated scans, and unnecessary sorting while keeping pipeline logic unchanged.
 - Added an Airflow spark_pool resource-control layer for Spark-heavy tasks across all pipeline DAGs to prevent multiple local spark-submit jobs from running at the same time in the Docker environment.
 - Added Airflow task hardening with centralized retry delay, execution timeouts for Spark-heavy and lightweight tasks, and a shared failure callback that writes structured failure messages to Airflow task logs.
+- Added optional Telegram alerting on top of the shared Airflow failure callback, with environment-based configuration, safe delivery error handling, mocked unit tests, and successful local manual validation.
 
 ## Business Value
 
@@ -692,6 +693,7 @@ dags/nyc_taxi_pipeline.py
 dags/nyc_taxi_period_refresh_pipeline.py
 dags/nyc_taxi_process_new_months_pipeline.py
 ```
+
 ### Local Spark Resource Control with Airflow Pools
 
 The project uses an Airflow Pool named `spark_pool` to limit concurrent local Spark execution.
@@ -750,12 +752,27 @@ Spark-heavy tasks use the Spark execution timeout. This includes Bronze, Silver,
 Lightweight Python/ClickHouse service tasks use the Python execution timeout. This includes ClickHouse table creation, truncation, month deletion, runtime config reading, raw period discovery, logging tasks, and ClickHouse quality checks.
 
 Each DAG also uses a shared Airflow failure callback:
-```
+
+```text
 jobs/airflow_callbacks.py
 ```
+
 The callback builds a structured failure message with the DAG ID, task ID, run ID, try number, logical date, log URL, and exception details.
 
-At the current stage, the callback writes this message to Airflow task logs. This creates a reusable foundation for future Telegram, Slack, email, or webhook-based alerting.
+The callback always writes this message to Airflow task logs.
+
+Optional Telegram alerting can also be enabled through environment variables:
+
+```text
+TELEGRAM_ALERTS_ENABLED=false
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_API_TIMEOUT_SECONDS=10
+```
+
+By default, Telegram alerting is disabled so the project can run locally without external secrets.
+
+When Telegram alerting is enabled and fully configured, the same structured failure message is sent to Telegram. Telegram delivery errors are caught and logged so alerting failures do not hide the original Airflow task failure.
 
 ### Full-Year Pipeline DAG
 
@@ -1262,7 +1279,9 @@ This test module validates project configuration logic:
 - taxi zone lookup path;
 - Airflow retry delay default setting;
 - Spark task execution timeout default setting;
-- Python/lightweight task execution timeout default setting.
+- Python/lightweight task execution timeout default setting;
+- Telegram alerting default settings;
+- Telegram alerting environment override behavior.
 
 ### `test_airflow_callbacks.py`
 
@@ -1272,7 +1291,12 @@ This test module validates shared Airflow failure callback logic:
 - safe attribute extraction from Airflow objects;
 - structured failure alert message generation;
 - fallback behavior when optional Airflow context fields are missing;
-- callback output to task logs.
+- callback output to task logs;
+- Telegram alerting configuration checks;
+- Telegram API URL construction;
+- Telegram request payload construction using mocked HTTP calls;
+- callback Telegram delivery when alerting is enabled;
+- safe logging of Telegram delivery errors.
 
 ### `test_clickhouse_utils.py`
 
@@ -1562,6 +1586,7 @@ The production-like monitoring and alerting strategy is documented in:
 ```text
 docs/monitoring_plan.md
 ```
+
 The plan includes Airflow DAG monitoring, Spark task runtime SLA thresholds, Silver and Gold data quality checks, ClickHouse serving-layer validation, Superset dashboard monitoring, and incident response guidelines.
 
 Part of the monitoring strategy is already implemented in the Airflow layer:
@@ -1570,9 +1595,20 @@ Part of the monitoring strategy is already implemented in the Airflow layer:
 - Spark-heavy tasks have execution timeouts to prevent long-running or hanging Spark jobs;
 - lightweight Python/ClickHouse tasks have execution timeouts;
 - all DAGs use a shared failure callback;
-- failure callback messages are written to Airflow task logs in a structured format.
+- failure callback messages are written to Airflow task logs in a structured format;
+- optional Telegram alerts can be enabled through environment variables;
+- Telegram delivery errors are caught and logged so alerting failures do not mask the original task failure.
 
-The current failure callback is intentionally transport-agnostic. External notifications such as Telegram or Slack can be added later on top of the same callback message builder.
+Telegram alerting is disabled by default and requires local private `.env` values for:
+
+```text
+TELEGRAM_ALERTS_ENABLED
+TELEGRAM_BOT_TOKEN
+TELEGRAM_CHAT_ID
+TELEGRAM_API_TIMEOUT_SECONDS
+```
+
+The Telegram integration was validated with a local manual callback test. Unit tests mock Telegram delivery and do not send real messages.
 
 ## How to Run Locally
 
@@ -1755,7 +1791,7 @@ Possible future improvements:
 - migrate Spark compute to Yandex Data Proc or another cloud Spark runtime as a separate cloud execution phase;
 - replace local subprocess-based Spark execution in Airflow DAGs with production-like job submission to Yandex Data Proc or another managed Spark compute layer, where Airflow only orchestrates, monitors job status, and fails tasks when cloud jobs fail;
 - decide whether ClickHouse should remain local for portfolio usage or move to a cloud-hosted serving layer;
-- add external notifications, such as Telegram or Slack alerts, on top of the existing Airflow failure callback;
+- add Slack, email, or additional external notification channels on top of the existing Airflow failure callback;
 - add task-family-specific Airflow execution timeouts based on the SLA thresholds documented in `docs/monitoring_plan.md`;
 - add runtime trend monitoring for Airflow tasks and Spark jobs;
 - add Prometheus, Grafana, and Alertmanager for infrastructure and pipeline observability if the project is deployed as a longer-running environment;

@@ -32,6 +32,16 @@ PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES = int(
 )
 
 
+TELEGRAM_ALERTS_ENABLED = (
+    os.getenv("TELEGRAM_ALERTS_ENABLED", "false").lower() == "true"
+)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_API_TIMEOUT_SECONDS = int(
+    os.getenv("TELEGRAM_API_TIMEOUT_SECONDS", "10")
+)
+
+
 # =========================
 # Object Storage settings
 # =========================

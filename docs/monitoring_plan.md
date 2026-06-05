@@ -89,6 +89,36 @@ They are intentionally higher than the observed maximum values to avoid noisy al
 | `load_gold_*_to_clickhouse` monthly tasks | > 1 min | > 2 min |
 | `check_clickhouse_gold_quality` | > 1 min | > 2 min |
 
+### Current Airflow Execution Timeouts
+
+The project currently uses baseline Airflow execution timeouts as a first hardening layer:
+
+```text
+SPARK_TASK_EXECUTION_TIMEOUT_MINUTES = 30
+PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES = 10
+```
+
+Spark-heavy tasks use the Spark timeout. This includes Bronze, Silver, Silver quality, Gold mart, Gold Object Storage schema/quality, and Spark-based ClickHouse load tasks.
+
+Lightweight Python/ClickHouse tasks use the Python timeout. This includes ClickHouse table creation, truncation, month deletion, runtime config reading, raw period discovery, logging tasks, and ClickHouse quality checks.
+
+These execution timeouts are intentionally broader than the SLA thresholds above.
+
+The SLA thresholds are monitoring signals:
+
+```text
+warning threshold  → investigate runtime drift
+critical threshold → serious runtime anomaly
+```
+
+Airflow execution timeout is a hard stop:
+
+```text
+execution_timeout → fail the task if it appears to be hanging
+```
+
+A future improvement is to replace the current broad task-category timeouts with task-family-specific execution timeouts based on the SLA thresholds in this document.
+
 ## Airflow Monitoring
 
 Airflow should be the primary orchestration monitoring layer.
@@ -129,6 +159,50 @@ The most important tasks to monitor are:
 | High | Any ClickHouse load job failed | Serving layer may be incomplete |
 | Medium | Any task retried | Review logs and runtime |
 | Medium | DAG runtime above warning threshold | Investigate slow task families |
+
+### Implemented Airflow Failure Alerting
+
+The project includes an implemented Airflow failure alerting layer for local production-like monitoring.
+
+All NYC Taxi DAGs use a shared Airflow failure callback:
+
+```text
+jobs/airflow_callbacks.py
+```
+
+The callback builds a structured failure message from the Airflow task context and writes it to Airflow task logs.
+
+The failure message includes:
+
+- DAG ID;
+- task ID;
+- Airflow run ID;
+- try number;
+- logical date;
+- Airflow task log URL;
+- exception details.
+
+The same message can also be sent to Telegram when Telegram alerting is enabled and configured.
+
+Telegram alerting is controlled through environment variables:
+
+```text
+TELEGRAM_ALERTS_ENABLED=false
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+TELEGRAM_API_TIMEOUT_SECONDS=10
+```
+
+By default, Telegram alerting is disabled so the project can run locally without external secrets.
+
+For local manual testing, Telegram alerting was enabled through the private `.env` file, and the Airflow failure callback successfully delivered a test notification to Telegram.
+
+The callback is designed to be safe:
+
+- it always writes the failure message to Airflow logs;
+- it sends Telegram alerts only when alerting is enabled and fully configured;
+- it catches Telegram delivery errors so alerting failures do not hide the original Airflow task failure;
+- unit tests mock Telegram delivery and do not send real messages.
 
 ## Spark Job Runtime Monitoring
 
@@ -343,11 +417,22 @@ Superset dashboards depend on the ClickHouse serving layer.
 
 In a production setup, alerts should be sent when failures affect the reliability of the pipeline or BI layer.
 
-Recommended channels:
+The current project implements the first alerting layer directly in Airflow:
 
+- task failure messages are written to Airflow logs through a shared failure callback;
+- optional Telegram alerts can be enabled through environment variables;
+- Telegram delivery errors are caught and logged so they do not mask the original task failure.
+
+Implemented alerting channels:
+
+- Airflow task logs;
+- optional Telegram notifications for Airflow task failures.
+
+Future alerting channels may include:
+
+- Slack notifications;
 - Airflow email alerts;
-- Slack or Telegram notifications;
-- monitoring dashboard in Grafana;
+- monitoring dashboards in Grafana;
 - incident tickets for repeated failures.
 
 ### Suggested Alert Levels
@@ -382,8 +467,9 @@ When a pipeline issue occurs, the recommended response flow is:
 
 Future improvements may include:
 
+- task-family-specific Airflow execution timeouts based on the SLA thresholds documented in this file;
+- Slack or additional external notification channels on top of the existing failure callback;
 - Airflow task-level SLA configuration;
-- Airflow failure callbacks for Telegram or Slack alerts;
 - automatic runtime threshold checks;
 - historical task duration tracking;
 - Prometheus and Grafana dashboards;
@@ -399,7 +485,7 @@ This monitoring plan defines how to track the health of the NYC Taxi data pipeli
 
 The most important monitoring priorities are:
 
-1. Airflow DAG success/failure;
+1. Airflow DAG success/failure with structured failure messages and optional Telegram alerts;
 2. monthly Silver job runtime SLA;
 3. Silver and Gold data quality checks;
 4. final ClickHouse full-year quality check;
