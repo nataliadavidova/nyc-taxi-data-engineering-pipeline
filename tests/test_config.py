@@ -115,6 +115,15 @@ def test_taxi_zone_lookup_path():
 
 def test_airflow_runtime_settings_defaults():
     assert config.AIRFLOW_RETRY_DELAY_MINUTES == 5
+
+    assert config.BRONZE_TASK_EXECUTION_TIMEOUT_MINUTES == 10
+    assert config.SILVER_TASK_EXECUTION_TIMEOUT_MINUTES == 20
+    assert config.SILVER_QUALITY_TASK_EXECUTION_TIMEOUT_MINUTES == 5
+    assert config.GOLD_STANDARD_TASK_EXECUTION_TIMEOUT_MINUTES == 8
+    assert config.GOLD_LOCATION_TASK_EXECUTION_TIMEOUT_MINUTES == 10
+    assert config.GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT_MINUTES == 5
+    assert config.CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT_MINUTES == 5
+
     assert config.SPARK_TASK_EXECUTION_TIMEOUT_MINUTES == 30
     assert config.PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES == 10
 

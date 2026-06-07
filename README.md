@@ -44,7 +44,7 @@ This project demonstrates core data engineering practices:
 - Added automated tests and GitHub Actions CI to validate configuration helpers, DAG imports, Airflow task dependencies, Spark transformation logic, and quality gates.
 - Optimized Spark, Object Storage, quality-check, and ClickHouse load jobs by reducing redundant actions, repeated scans, and unnecessary sorting while keeping pipeline logic unchanged.
 - Added an Airflow spark_pool resource-control layer for Spark-heavy tasks across all pipeline DAGs to prevent multiple local spark-submit jobs from running at the same time in the Docker environment.
-- Added Airflow task hardening with centralized retry delay, execution timeouts for Spark-heavy and lightweight tasks, and a shared failure callback that writes structured failure messages to Airflow task logs.
+- Added Airflow task hardening with centralized retry delay, task-family-specific execution timeouts, fallback timeouts for future tasks, and a shared failure callback that writes structured failure messages to Airflow task logs.
 - Added optional Telegram alerting on top of the shared Airflow failure callback, with environment-based configuration, safe delivery error handling, mocked unit tests, and successful local manual validation.
 
 ## Business Value
@@ -733,23 +733,47 @@ The project also includes a basic Airflow task hardening layer for local product
 All NYC Taxi DAGs use centralized Airflow runtime settings for:
 
 - retry delay;
-- Spark task execution timeout;
-- lightweight Python/ClickHouse task execution timeout;
+- task-family-specific execution timeouts;
+- broad fallback timeouts for future Spark-heavy and lightweight Python/ClickHouse tasks;
 - shared task failure callback.
 
 Default runtime settings are defined in `jobs/config.py`:
 
 ```text
 AIRFLOW_RETRY_DELAY_MINUTES = 5
+
+BRONZE_TASK_EXECUTION_TIMEOUT_MINUTES = 10
+SILVER_TASK_EXECUTION_TIMEOUT_MINUTES = 20
+SILVER_QUALITY_TASK_EXECUTION_TIMEOUT_MINUTES = 5
+GOLD_STANDARD_TASK_EXECUTION_TIMEOUT_MINUTES = 8
+GOLD_LOCATION_TASK_EXECUTION_TIMEOUT_MINUTES = 10
+GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT_MINUTES = 5
+CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT_MINUTES = 5
+
 SPARK_TASK_EXECUTION_TIMEOUT_MINUTES = 30
 PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES = 10
 ```
 
 These values can be overridden through environment variables if needed.
 
-Spark-heavy tasks use the Spark execution timeout. This includes Bronze, Silver, Silver quality, Gold mart, Gold Object Storage schema/quality, and Spark-based ClickHouse load tasks.
+The task-family-specific execution timeouts are used as hard stops for known pipeline task families:
 
-Lightweight Python/ClickHouse service tasks use the Python execution timeout. This includes ClickHouse table creation, truncation, month deletion, runtime config reading, raw period discovery, logging tasks, and ClickHouse quality checks.
+| Task family | Airflow execution timeout |
+|---|---:|
+| `bronze_yellow_taxi` | 10 min |
+| `silver_yellow_taxi` | 20 min |
+| `check_yellow_taxi_quality` | 5 min |
+| `gold_daily_trips` | 8 min |
+| `gold_hourly_trips` | 8 min |
+| `gold_payment_type_stats` | 8 min |
+| `gold_location_pair_stats` | 10 min |
+| `check_gold_schema` | 5 min |
+| `load_gold_*_to_clickhouse` | 5 min |
+| lightweight Python/ClickHouse service tasks | 10 min |
+
+`SPARK_TASK_EXECUTION_TIMEOUT_MINUTES = 30` remains as a broad fallback for future Spark-heavy tasks that are not yet assigned to a specific task family.
+
+The timeout values are intentionally higher than warning and critical runtime thresholds documented in `docs/monitoring_plan.md`. Warning and critical thresholds are monitoring signals, while Airflow `execution_timeout` is a hard stop that fails the task if it appears to be hanging.
 
 Each DAG also uses a shared Airflow failure callback:
 
@@ -1278,7 +1302,8 @@ This test module validates project configuration logic:
 - raw, bronze, silver, quality, bad records, and gold layer paths;
 - taxi zone lookup path;
 - Airflow retry delay default setting;
-- Spark task execution timeout default setting;
+- task-family-specific execution timeout default settings;
+- Spark fallback execution timeout default setting;
 - Python/lightweight task execution timeout default setting;
 - Telegram alerting default settings;
 - Telegram alerting environment override behavior.
@@ -1345,7 +1370,7 @@ This test module validates Airflow orchestration logic:
 - final ClickHouse gold quality check runs after all December load tasks;
 - all tasks use the shared Airflow failure callback;
 - all tasks use the configured retry delay;
-- Spark-heavy tasks use the configured Spark execution timeout;
+- Spark-heavy and Spark-based ClickHouse load tasks use task-family-specific execution timeouts;
 - lightweight ClickHouse service tasks use the configured Python execution timeout.
 
 ### `test_period_refresh_dag.py`
@@ -1373,7 +1398,7 @@ This test module validates the period refresh Airflow DAG structure:
 - non-Spark tasks remain outside the Spark pool;
 - all tasks use the shared Airflow failure callback;
 - all tasks use the configured retry delay;
-- Spark-heavy mapped TaskGroup tasks use the configured Spark execution timeout;
+- Spark-heavy mapped TaskGroup tasks and Spark-based ClickHouse load tasks use task-family-specific execution timeouts;
 - non-Spark processing tasks use the configured Python execution timeout.
 
 ### `test_process_new_months_dag.py`
@@ -1398,7 +1423,7 @@ This test module validates the new-month processing Airflow DAG structure:
 - discovery, logging, ClickHouse cleanup, month-level quality, and finish tasks remain outside the Spark pool;
 - all tasks use the shared Airflow failure callback;
 - all tasks use the configured retry delay;
-- Spark-heavy mapped TaskGroup tasks use the configured Spark execution timeout;
+- Spark-heavy mapped TaskGroup tasks and Spark-based ClickHouse load tasks use task-family-specific execution timeouts;
 - discovery, logging, ClickHouse cleanup, and month-level quality tasks use the configured Python execution timeout.
 
 ### `test_period_utils.py`
@@ -1592,12 +1617,18 @@ The plan includes Airflow DAG monitoring, Spark task runtime SLA thresholds, Sil
 Part of the monitoring strategy is already implemented in the Airflow layer:
 
 - all DAGs use explicit retry delay;
-- Spark-heavy tasks have execution timeouts to prevent long-running or hanging Spark jobs;
-- lightweight Python/ClickHouse tasks have execution timeouts;
+- known Spark-heavy task families have task-specific execution timeouts to prevent long-running or hanging Spark jobs;
+- Spark-based ClickHouse load tasks have their own execution timeout;
+- lightweight Python/ClickHouse tasks have a separate execution timeout;
+- a broad Spark fallback timeout remains available for future Spark-heavy tasks that are not yet assigned to a specific task family;
 - all DAGs use a shared failure callback;
 - failure callback messages are written to Airflow task logs in a structured format;
 - optional Telegram alerts can be enabled through environment variables;
 - Telegram delivery errors are caught and logged so alerting failures do not mask the original task failure.
+
+If a task exceeds its Airflow `execution_timeout`, Airflow fails the task. The shared failure callback then writes the structured failure message to task logs and, if Telegram alerting is enabled, sends the same message to Telegram.
+
+Warning and critical runtime alerts for tasks that are still running require a separate runtime watcher and are planned as a future monitoring improvement.
 
 Telegram alerting is disabled by default and requires local private `.env` values for:
 
@@ -1792,7 +1823,7 @@ Possible future improvements:
 - replace local subprocess-based Spark execution in Airflow DAGs with production-like job submission to Yandex Data Proc or another managed Spark compute layer, where Airflow only orchestrates, monitors job status, and fails tasks when cloud jobs fail;
 - decide whether ClickHouse should remain local for portfolio usage or move to a cloud-hosted serving layer;
 - add Slack, email, or additional external notification channels on top of the existing Airflow failure callback;
-- add task-family-specific Airflow execution timeouts based on the SLA thresholds documented in `docs/monitoring_plan.md`;
+- add a runtime watcher for informational and critical alerts on still-running Airflow tasks before they reach execution timeout;
 - add runtime trend monitoring for Airflow tasks and Spark jobs;
 - add Prometheus, Grafana, and Alertmanager for infrastructure and pipeline observability if the project is deployed as a longer-running environment;
 - add taxi zone polygon-based choropleth maps instead of centroid-based point maps;

@@ -46,9 +46,15 @@ from config import (
     AIRFLOW_JOBS_DIR,
     AIRFLOW_PROJECT_DIR,
     AIRFLOW_RETRY_DELAY_MINUTES,
+    BRONZE_TASK_EXECUTION_TIMEOUT_MINUTES,
+    CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT_MINUTES,
+    GOLD_LOCATION_TASK_EXECUTION_TIMEOUT_MINUTES,
+    GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT_MINUTES,
+    GOLD_STANDARD_TASK_EXECUTION_TIMEOUT_MINUTES,
     PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES,
     S3_ENDPOINT,
-    SPARK_TASK_EXECUTION_TIMEOUT_MINUTES,
+    SILVER_QUALITY_TASK_EXECUTION_TIMEOUT_MINUTES,
+    SILVER_TASK_EXECUTION_TIMEOUT_MINUTES,
 )
 
 from airflow_callbacks import airflow_failure_callback
@@ -74,9 +80,29 @@ SPARK_SUBMIT_OPTIONS_WITH_CLICKHOUSE = (
 SPARK_POOL = "spark_pool"
 
 AIRFLOW_RETRY_DELAY = timedelta(minutes=AIRFLOW_RETRY_DELAY_MINUTES)
-SPARK_TASK_EXECUTION_TIMEOUT = timedelta(
-    minutes=SPARK_TASK_EXECUTION_TIMEOUT_MINUTES
+
+BRONZE_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=BRONZE_TASK_EXECUTION_TIMEOUT_MINUTES
 )
+SILVER_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=SILVER_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+SILVER_QUALITY_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=SILVER_QUALITY_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+GOLD_STANDARD_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+GOLD_LOCATION_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=GOLD_LOCATION_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+
 PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(
     minutes=PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES
 )
@@ -275,7 +301,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="bronze_yellow_taxi", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="bronze_yellow_taxi", pool=SPARK_POOL, execution_timeout=BRONZE_TASK_EXECUTION_TIMEOUT,)
     def bronze_yellow_taxi_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -284,7 +310,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="silver_yellow_taxi", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="silver_yellow_taxi", pool=SPARK_POOL, execution_timeout=SILVER_TASK_EXECUTION_TIMEOUT,)
     def silver_yellow_taxi_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -293,7 +319,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="check_yellow_taxi_quality", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="check_yellow_taxi_quality", pool=SPARK_POOL, execution_timeout=SILVER_QUALITY_TASK_EXECUTION_TIMEOUT,)
     def check_yellow_taxi_quality_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -302,7 +328,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_hourly_trips", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="gold_hourly_trips", pool=SPARK_POOL, execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,)
     def gold_hourly_trips_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -311,7 +337,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_daily_trips", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="gold_daily_trips", pool=SPARK_POOL, execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,)
     def gold_daily_trips_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -320,7 +346,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_payment_type_stats", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="gold_payment_type_stats", pool=SPARK_POOL, execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT)
     def gold_payment_type_stats_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -329,7 +355,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="gold_location_pair_stats", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="gold_location_pair_stats", pool=SPARK_POOL, execution_timeout=GOLD_LOCATION_TASK_EXECUTION_TIMEOUT)
     def gold_location_pair_stats_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -338,7 +364,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="check_gold_schema", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="check_gold_schema", pool=SPARK_POOL, execution_timeout=GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT)
     def check_gold_schema_task(period: DiscoveredPeriod) -> None:
         run_shell_command(
             build_spark_job_command(
@@ -347,7 +373,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_hourly_trips_to_clickhouse", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="load_gold_hourly_trips_to_clickhouse", pool=SPARK_POOL, execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT)
     def load_gold_hourly_trips_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -358,7 +384,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_daily_trips_to_clickhouse", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="load_gold_daily_trips_to_clickhouse", pool=SPARK_POOL, execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT)
     def load_gold_daily_trips_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -369,7 +395,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_payment_type_stats_to_clickhouse", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="load_gold_payment_type_stats_to_clickhouse", pool=SPARK_POOL, execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT)
     def load_gold_payment_type_stats_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:
@@ -380,7 +406,7 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
             )
         )
 
-    @task(task_id="load_gold_location_pair_stats_to_clickhouse", pool=SPARK_POOL, execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,)
+    @task(task_id="load_gold_location_pair_stats_to_clickhouse", pool=SPARK_POOL, execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT)
     def load_gold_location_pair_stats_to_clickhouse_task(
         period: DiscoveredPeriod,
     ) -> None:

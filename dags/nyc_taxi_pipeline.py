@@ -19,8 +19,15 @@ from config import (
     AIRFLOW_JOBS_DIR,
     AIRFLOW_PROJECT_DIR,
     AIRFLOW_RETRY_DELAY_MINUTES,
+    BRONZE_TASK_EXECUTION_TIMEOUT_MINUTES,
+    CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT_MINUTES,
+    GOLD_LOCATION_TASK_EXECUTION_TIMEOUT_MINUTES,
+    GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT_MINUTES,
+    GOLD_STANDARD_TASK_EXECUTION_TIMEOUT_MINUTES,
     PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES,
     S3_ENDPOINT,
+    SILVER_QUALITY_TASK_EXECUTION_TIMEOUT_MINUTES,
+    SILVER_TASK_EXECUTION_TIMEOUT_MINUTES,
     SPARK_TASK_EXECUTION_TIMEOUT_MINUTES,
 )
 
@@ -51,6 +58,29 @@ SPARK_SUBMIT_OPTIONS_WITH_CLICKHOUSE = (
 SPARK_POOL = "spark_pool"
 
 AIRFLOW_RETRY_DELAY = timedelta(minutes=AIRFLOW_RETRY_DELAY_MINUTES)
+
+BRONZE_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=BRONZE_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+SILVER_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=SILVER_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+SILVER_QUALITY_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=SILVER_QUALITY_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+GOLD_STANDARD_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+GOLD_LOCATION_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=GOLD_LOCATION_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT = timedelta(
+    minutes=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT_MINUTES
+)
+
 SPARK_TASK_EXECUTION_TIMEOUT = timedelta(
     minutes=SPARK_TASK_EXECUTION_TIMEOUT_MINUTES
 )
@@ -58,12 +88,37 @@ PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(
     minutes=PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES
 )
 
+SPARK_TASK_EXECUTION_TIMEOUTS = {
+    "bronze_yellow_taxi": BRONZE_TASK_EXECUTION_TIMEOUT,
+    "silver_yellow_taxi": SILVER_TASK_EXECUTION_TIMEOUT,
+    "check_yellow_taxi_quality": SILVER_QUALITY_TASK_EXECUTION_TIMEOUT,
+    "gold_daily_trips": GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+    "gold_hourly_trips": GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+    "gold_payment_type_stats": GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+    "gold_location_pair_stats": GOLD_LOCATION_TASK_EXECUTION_TIMEOUT,
+    "check_gold_schema": GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT,
+}
+
 default_args = {
     "owner": "natalia",
     "retries": 1,
     "retry_delay": AIRFLOW_RETRY_DELAY,
     "on_failure_callback": airflow_failure_callback,
 }
+
+
+def get_spark_task_execution_timeout(task_id: str) -> timedelta:
+    """
+    Return task-family-specific timeout for Spark-heavy tasks.
+
+    Falls back to the broad Spark timeout for future Spark tasks that are not
+    yet assigned to a specific task family.
+    """
+
+    return SPARK_TASK_EXECUTION_TIMEOUTS.get(
+        task_id,
+        SPARK_TASK_EXECUTION_TIMEOUT,
+    )
 
 
 def spark_task(task_id: str, job_file: str, month: str) -> BashOperator:
@@ -74,7 +129,7 @@ def spark_task(task_id: str, job_file: str, month: str) -> BashOperator:
         PYTHONPATH={JOBS_DIR} {SPARK_SUBMIT_BASE} jobs/{job_file} --year {YEAR} --month {month}
         """,
         pool=SPARK_POOL,
-        execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,
+        execution_timeout=get_spark_task_execution_timeout(task_id),
     )
 
 
@@ -89,7 +144,7 @@ def clickhouse_load_task(task_id: str, job_file: str, month: str) -> BashOperato
         --month {month}
         """,
         pool=SPARK_POOL,
-        execution_timeout=SPARK_TASK_EXECUTION_TIMEOUT,
+        execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT,
     )
 
 
