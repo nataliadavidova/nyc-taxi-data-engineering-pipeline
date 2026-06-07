@@ -34,7 +34,15 @@ def process_new_months_dag(dagbag):
 DISCOVERY_TASK_ID = "discover_new_raw_periods"
 SPARK_POOL = "spark_pool"
 AIRFLOW_RETRY_DELAY = timedelta(minutes=5)
-SPARK_TASK_EXECUTION_TIMEOUT = timedelta(minutes=30)
+
+BRONZE_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
+SILVER_TASK_EXECUTION_TIMEOUT = timedelta(minutes=20)
+SILVER_QUALITY_TASK_EXECUTION_TIMEOUT = timedelta(minutes=5)
+GOLD_STANDARD_TASK_EXECUTION_TIMEOUT = timedelta(minutes=8)
+GOLD_LOCATION_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
+GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT = timedelta(minutes=5)
+CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT = timedelta(minutes=5)
+
 PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
 
 def mapped_task_upstreams(*business_upstream_task_ids):
@@ -259,28 +267,42 @@ def test_process_new_months_tasks_use_failure_callback_and_retry_delay(
         assert task.on_failure_callback == airflow_failure_callback
 
 
-def test_process_new_months_spark_tasks_use_spark_execution_timeout(
+def test_process_new_months_spark_tasks_use_task_family_execution_timeouts(
     process_new_months_dag,
 ):
-    spark_task_ids = [
-        "process_month.bronze_yellow_taxi",
-        "process_month.silver_yellow_taxi",
-        "process_month.check_yellow_taxi_quality",
-        "process_month.gold_daily_trips",
-        "process_month.gold_hourly_trips",
-        "process_month.gold_payment_type_stats",
-        "process_month.gold_location_pair_stats",
-        "process_month.check_gold_schema",
-        "process_month.load_gold_daily_trips_to_clickhouse",
-        "process_month.load_gold_hourly_trips_to_clickhouse",
-        "process_month.load_gold_payment_type_stats_to_clickhouse",
-        "process_month.load_gold_location_pair_stats_to_clickhouse",
-    ]
+    task_timeout_mapping = {
+        "process_month.bronze_yellow_taxi": BRONZE_TASK_EXECUTION_TIMEOUT,
+        "process_month.silver_yellow_taxi": SILVER_TASK_EXECUTION_TIMEOUT,
+        "process_month.check_yellow_taxi_quality": (
+            SILVER_QUALITY_TASK_EXECUTION_TIMEOUT
+        ),
+        "process_month.gold_daily_trips": GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+        "process_month.gold_hourly_trips": GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+        "process_month.gold_payment_type_stats": (
+            GOLD_STANDARD_TASK_EXECUTION_TIMEOUT
+        ),
+        "process_month.gold_location_pair_stats": (
+            GOLD_LOCATION_TASK_EXECUTION_TIMEOUT
+        ),
+        "process_month.check_gold_schema": GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT,
+        "process_month.load_gold_daily_trips_to_clickhouse": (
+            CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT
+        ),
+        "process_month.load_gold_hourly_trips_to_clickhouse": (
+            CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT
+        ),
+        "process_month.load_gold_payment_type_stats_to_clickhouse": (
+            CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT
+        ),
+        "process_month.load_gold_location_pair_stats_to_clickhouse": (
+            CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT
+        ),
+    }
 
-    for task_id in spark_task_ids:
+    for task_id, expected_timeout in task_timeout_mapping.items():
         task = process_new_months_dag.get_task(task_id)
 
-        assert task.execution_timeout == SPARK_TASK_EXECUTION_TIMEOUT
+        assert task.execution_timeout == expected_timeout
 
 
 def test_process_new_months_non_spark_tasks_use_python_execution_timeout(

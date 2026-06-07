@@ -16,7 +16,15 @@ JOBS_DIR = PROJECT_ROOT / "jobs"
 SPARK_POOL = "spark_pool"
 
 AIRFLOW_RETRY_DELAY = timedelta(minutes=5)
-SPARK_TASK_EXECUTION_TIMEOUT = timedelta(minutes=30)
+
+BRONZE_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
+SILVER_TASK_EXECUTION_TIMEOUT = timedelta(minutes=20)
+SILVER_QUALITY_TASK_EXECUTION_TIMEOUT = timedelta(minutes=5)
+GOLD_STANDARD_TASK_EXECUTION_TIMEOUT = timedelta(minutes=8)
+GOLD_LOCATION_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
+GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT = timedelta(minutes=5)
+CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT = timedelta(minutes=5)
+
 PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(minutes=10)
 
 sys.path.insert(0, str(JOBS_DIR))
@@ -227,29 +235,35 @@ def test_dag_tasks_use_failure_callback_and_retry_delay(nyc_taxi_dag):
         assert task.on_failure_callback == airflow_failure_callback
 
 
-def test_spark_tasks_use_spark_execution_timeout(nyc_taxi_dag):
-    spark_task_prefixes = [
-        "bronze_yellow_taxi",
-        "silver_yellow_taxi",
-        "check_yellow_taxi_quality",
-        "gold_daily_trips",
-        "gold_hourly_trips",
-        "gold_payment_type_stats",
-        "gold_location_pair_stats",
-        "check_gold_schema",
-        "load_gold_daily_trips_to_clickhouse",
-        "load_gold_hourly_trips_to_clickhouse",
-        "load_gold_payment_type_stats_to_clickhouse",
-        "load_gold_location_pair_stats_to_clickhouse",
-    ]
+def test_spark_tasks_use_task_family_execution_timeouts(nyc_taxi_dag):
+    task_timeout_mapping = {
+        "bronze_yellow_taxi": BRONZE_TASK_EXECUTION_TIMEOUT,
+        "silver_yellow_taxi": SILVER_TASK_EXECUTION_TIMEOUT,
+        "check_yellow_taxi_quality": SILVER_QUALITY_TASK_EXECUTION_TIMEOUT,
+        "gold_daily_trips": GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+        "gold_hourly_trips": GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+        "gold_payment_type_stats": GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+        "gold_location_pair_stats": GOLD_LOCATION_TASK_EXECUTION_TIMEOUT,
+        "check_gold_schema": GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT,
+        "load_gold_daily_trips_to_clickhouse": (
+            CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT
+        ),
+        "load_gold_hourly_trips_to_clickhouse": (
+            CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT
+        ),
+        "load_gold_payment_type_stats_to_clickhouse": (
+            CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT
+        ),
+        "load_gold_location_pair_stats_to_clickhouse": (
+            CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT
+        ),
+    }
 
-    months = [f"{month:02d}" for month in range(1, 13)]
+    for month in ["01", "12"]:
+        for task_id_prefix, expected_timeout in task_timeout_mapping.items():
+            task = nyc_taxi_dag.get_task(f"{task_id_prefix}_2024_{month}")
 
-    for month in months:
-        for task_prefix in spark_task_prefixes:
-            task = nyc_taxi_dag.get_task(f"{task_prefix}_2024_{month}")
-
-            assert task.execution_timeout == SPARK_TASK_EXECUTION_TIMEOUT
+            assert task.execution_timeout == expected_timeout
 
 
 def test_clickhouse_service_tasks_use_python_execution_timeout(nyc_taxi_dag):

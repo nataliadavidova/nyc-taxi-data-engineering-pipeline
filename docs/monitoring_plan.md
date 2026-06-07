@@ -69,46 +69,74 @@ The table below summarizes task duration statistics from the latest successful f
 | `load_gold_hourly_trips_to_clickhouse` | 12 | 0.35 | 0.41 |
 | `check_clickhouse_gold_quality` | 1 | 0.01 | 0.01 |
 
-## SLA Thresholds
+## Runtime Thresholds and Airflow Execution Timeouts
 
-The SLA thresholds below are initial local thresholds based on the latest successful full-year DAG run.
+The thresholds below are initial local thresholds based on the latest successful full-year DAG run.
 
 They are intentionally higher than the observed maximum values to avoid noisy alerts, but low enough to catch meaningful runtime regressions.
 
-| Area | Warning threshold | Critical threshold |
-|---|---:|---:|
-| Full DAG runtime | > 115 min | > 135 min |
-| `silver_yellow_taxi` monthly task | > 6.5 min | > 10 min |
-| `gold_location_pair_stats` monthly task | > 3.5 min | > 5 min |
-| `bronze_yellow_taxi` monthly task | > 2.5 min | > 4 min |
-| `gold_daily_trips` monthly task | > 1.5 min | > 2.5 min |
-| `gold_hourly_trips` monthly task | > 2 min | > 3 min |
-| `gold_payment_type_stats` monthly task | > 2 min | > 3 min |
-| `check_yellow_taxi_quality` monthly task | > 1.5 min | > 2 min |
-| `check_gold_schema` monthly task | > 1.5 min | > 2 min |
-| `load_gold_*_to_clickhouse` monthly tasks | > 1 min | > 2 min |
-| `check_clickhouse_gold_quality` | > 1 min | > 2 min |
+This table separates three different levels of runtime control:
 
-### Current Airflow Execution Timeouts
+- **Warning threshold** means the task is slower than usual and should trigger an informational alert.
+- **Critical threshold** means the task runtime is clearly abnormal and should trigger a critical alert.
+- **Airflow execution timeout** is a hard stop. If a task runs longer than this value, Airflow fails the task automatically.
 
-The project currently uses baseline Airflow execution timeouts as a first hardening layer:
+| Area | Warning threshold | Critical threshold | Airflow execution timeout |
+|---|---:|---:|---:|
+| Full DAG runtime | > 115 min | > 135 min | Not configured yet |
+| `silver_yellow_taxi` monthly task | > 6.5 min | > 10 min | > 20 min |
+| `gold_location_pair_stats` monthly task | > 3.5 min | > 5 min | > 10 min |
+| `bronze_yellow_taxi` monthly task | > 2.5 min | > 4 min | > 10 min |
+| `gold_daily_trips` monthly task | > 1.5 min | > 2.5 min | > 8 min |
+| `gold_hourly_trips` monthly task | > 2 min | > 3 min | > 8 min |
+| `gold_payment_type_stats` monthly task | > 2 min | > 3 min | > 8 min |
+| `check_yellow_taxi_quality` monthly task | > 1.5 min | > 2 min | > 5 min |
+| `check_gold_schema` monthly task | > 1.5 min | > 2 min | > 5 min |
+| `load_gold_*_to_clickhouse` monthly tasks | > 1 min | > 2 min | > 5 min |
+| `check_clickhouse_gold_quality` | > 1 min | > 2 min | > 10 min |
+
+### Current Airflow Execution Timeout Implementation
+
+The project currently implements task-family-specific Airflow execution timeouts based on the hard-stop values in the table above.
+
+These timeouts are configured centrally in `jobs/config.py` and applied in all NYC Taxi Airflow DAGs.
+
+The current task-family timeout configuration is:
 
 ```text
-SPARK_TASK_EXECUTION_TIMEOUT_MINUTES = 30
+BRONZE_TASK_EXECUTION_TIMEOUT_MINUTES = 10
+SILVER_TASK_EXECUTION_TIMEOUT_MINUTES = 20
+SILVER_QUALITY_TASK_EXECUTION_TIMEOUT_MINUTES = 5
+GOLD_STANDARD_TASK_EXECUTION_TIMEOUT_MINUTES = 8
+GOLD_LOCATION_TASK_EXECUTION_TIMEOUT_MINUTES = 10
+GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT_MINUTES = 5
+CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT_MINUTES = 5
 PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES = 10
+SPARK_TASK_EXECUTION_TIMEOUT_MINUTES = 30
 ```
 
-Spark-heavy tasks use the Spark timeout. This includes Bronze, Silver, Silver quality, Gold mart, Gold Object Storage schema/quality, and Spark-based ClickHouse load tasks.
+`SPARK_TASK_EXECUTION_TIMEOUT_MINUTES` remains as a broad fallback timeout for future Spark-heavy tasks that are not yet assigned to a more specific task family.
 
-Lightweight Python/ClickHouse tasks use the Python timeout. This includes ClickHouse table creation, truncation, month deletion, runtime config reading, raw period discovery, logging tasks, and ClickHouse quality checks.
+The current task-family mapping is:
 
-These execution timeouts are intentionally broader than the SLA thresholds above.
+| Task family | Airflow execution timeout |
+|---|---:|
+| `bronze_yellow_taxi` | 10 min |
+| `silver_yellow_taxi` | 20 min |
+| `check_yellow_taxi_quality` | 5 min |
+| `gold_daily_trips` | 8 min |
+| `gold_hourly_trips` | 8 min |
+| `gold_payment_type_stats` | 8 min |
+| `gold_location_pair_stats` | 10 min |
+| `check_gold_schema` | 5 min |
+| `load_gold_*_to_clickhouse` | 5 min |
+| lightweight Python/ClickHouse service tasks | 10 min |
 
 The SLA thresholds are monitoring signals:
 
 ```text
-warning threshold  → investigate runtime drift
-critical threshold → serious runtime anomaly
+warning threshold  → informational alert
+critical threshold → critical alert
 ```
 
 Airflow execution timeout is a hard stop:
@@ -117,7 +145,7 @@ Airflow execution timeout is a hard stop:
 execution_timeout → fail the task if it appears to be hanging
 ```
 
-A future improvement is to replace the current broad task-category timeouts with task-family-specific execution timeouts based on the SLA thresholds in this document.
+Warning and critical runtime alerts for still-running tasks require a separate runtime watcher that checks the Airflow metadata database while tasks are running. This is planned as a future monitoring improvement.
 
 ## Airflow Monitoring
 
@@ -467,7 +495,7 @@ When a pipeline issue occurs, the recommended response flow is:
 
 Future improvements may include:
 
-- task-family-specific Airflow execution timeouts based on the SLA thresholds documented in this file;
+- runtime watcher for informational and critical alerts on still-running Airflow tasks before they reach execution timeout;
 - Slack or additional external notification channels on top of the existing failure callback;
 - Airflow task-level SLA configuration;
 - automatic runtime threshold checks;
