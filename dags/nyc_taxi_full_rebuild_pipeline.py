@@ -1,60 +1,32 @@
 """
-Airflow DAG for period-based NYC Taxi pipeline refresh.
+Airflow DAG for protected NYC Taxi full rebuild pipeline.
 
-This DAG is a safer extension of nyc_taxi_full_rebuild_pipeline.py.
-
-Current supported mode:
-    refresh_mode = "replace_period"
-
-replace_period mode:
-    For each selected year/month:
-    - delete existing rows for this month from ClickHouse gold tables;
-    - rebuild bronze/silver/gold data for this month;
-    - load rebuilt gold marts to ClickHouse;
-    - validate ClickHouse gold data for this month.
-
-Why this DAG exists:
-    The original nyc_taxi_full_rebuild_pipeline.py performs a controlled full-year rebuild.
-    This DAG introduces period-based refresh logic without breaking the
-    existing stable pipeline.
-
-Runtime configuration:
-    The selected refresh period can be passed through Airflow Trigger DAG config.
-
-Example one-month reload:
-    {
-        "start_year": "2024",
-        "start_month": "05",
-        "end_year": "2024",
-        "end_month": "05",
-        "refresh_mode": "replace_period"
-    }
-
-Example interval reload:
-    {
-        "start_year": "2024",
-        "start_month": "01",
-        "end_year": "2024",
-        "end_month": "02",
-        "refresh_mode": "replace_period"
-    }
-
-If no runtime config is provided, the DAG uses safe default values from
-period_refresh_config.py.
+Pipeline:
+create ClickHouse tables
+→ validate full rebuild runtime config
+→ discover and validate raw periods
+→ truncate ClickHouse gold tables
+→ bronze
+→ silver
+→ check_quality
+→ gold_daily / gold_hourly / gold_payment / gold_location
+→ check_gold_schema
+→ load_gold_daily / load_gold_hourly / load_gold_payment / load_gold_location
+→ month-level ClickHouse quality checks
 """
 
-from __future__ import annotations
+from datetime import datetime, timedelta
 
 import shlex
 import subprocess
-from datetime import datetime, timedelta
-from typing import Dict, List
+
+from typing import Any, Dict, List
 
 from airflow import DAG
-from airflow.decorators import task, task_group
 from airflow.operators.bash import BashOperator
-from airflow.operators.empty import EmptyOperator
+from airflow.decorators import task, task_group
 from airflow.operators.python import get_current_context
+from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
 
 from config import (
@@ -72,15 +44,18 @@ from config import (
     SILVER_TASK_EXECUTION_TIMEOUT_MINUTES,
 )
 
-from period_refresh_config import (
-    DEFAULT_END_MONTH,
-    DEFAULT_END_YEAR,
-    DEFAULT_REFRESH_MODE,
-    DEFAULT_START_MONTH,
-    DEFAULT_START_YEAR,
+from full_rebuild_config import (
+    DEFAULT_CONFIRM_CLICKHOUSE_TRUNCATE,
+    DEFAULT_CONFIRM_FULL_REBUILD,
+    DEFAULT_EXPECTED_END_MONTH,
+    DEFAULT_EXPECTED_END_YEAR,
+    DEFAULT_EXPECTED_START_MONTH,
+    DEFAULT_EXPECTED_START_YEAR,
+    DEFAULT_REBUILD_MODE,
 )
 
 from airflow_callbacks import airflow_failure_callback
+
 
 PROJECT_DIR = AIRFLOW_PROJECT_DIR
 JOBS_DIR = AIRFLOW_JOBS_DIR
@@ -129,6 +104,7 @@ CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT = timedelta(
 PYTHON_TASK_EXECUTION_TIMEOUT = timedelta(
     minutes=PYTHON_TASK_EXECUTION_TIMEOUT_MINUTES
 )
+
 
 default_args = {
     "owner": "natalia",
@@ -226,7 +202,7 @@ def build_clickhouse_load_command(
     period: PeriodParam,
 ) -> str:
     """
-    Build shell command for a Spark-based ClickHouse load monthly job.
+    Build shell command for a Spark-based ClickHouse monthly load job.
     """
 
     year = get_period_year(period)
@@ -243,23 +219,19 @@ def build_clickhouse_load_command(
     )
 
 
-@task(task_id="read_period_refresh_config", execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT)
-def read_period_refresh_config_task() -> List[PeriodParam]:
+@task(
+    task_id="validate_full_rebuild_config",
+    execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+)
+def validate_full_rebuild_config_task() -> Dict[str, Any]:
     """
-    Read Airflow runtime config and return period dictionaries for mapped tasks.
+    Read and validate runtime config for the protected full rebuild.
 
-    The task reads Airflow Params / Trigger DAG config from the task context.
-    Returned format:
-        [
-            {"year": "2024", "month": "05"},
-            {"year": "2024", "month": "06"},
-        ]
+    The task fails before ClickHouse truncate if explicit confirmations or
+    expected period boundaries are missing or invalid.
     """
 
-    from period_refresh_config import (
-        build_period_refresh_periods,
-        format_period_params,
-    )
+    from full_rebuild_config import validate_full_rebuild_runtime_config
 
     context = get_current_context()
     dag_run = context.get("dag_run")
@@ -269,60 +241,140 @@ def read_period_refresh_config_task() -> List[PeriodParam]:
     if dag_run and dag_run.conf:
         runtime_config.update(dag_run.conf)
 
-    periods = build_period_refresh_periods(runtime_config)
+    validated_config = validate_full_rebuild_runtime_config(runtime_config)
 
-    print(f"Period refresh runtime config: {runtime_config}")
-    print(f"Period refresh selected periods: {format_period_params(periods)}")
+    print(f"Validated full rebuild config: {validated_config}")
 
-    return periods
+    return validated_config
 
 
-@task(task_id="log_period_refresh_periods", execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT)
-def log_period_refresh_periods(periods: List[PeriodParam]) -> None:
+@task(
+    task_id="discover_full_rebuild_raw_periods",
+    execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+)
+def discover_full_rebuild_raw_periods_task() -> List[PeriodParam]:
     """
-    Log selected period refresh periods.
+    Discover all available raw Yellow Taxi monthly periods.
+    """
+
+    from raw_discovery import format_periods, list_raw_yellow_periods
+
+    periods = list_raw_yellow_periods()
+
+    print(f"Full rebuild discovered raw periods: {format_periods(periods)}")
+
+    return [
+        {
+            "year": year,
+            "month": month,
+        }
+        for year, month in periods
+    ]
+
+
+@task(
+    task_id="validate_full_rebuild_raw_periods",
+    execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+)
+def validate_full_rebuild_raw_periods_task(
+    raw_periods: List[PeriodParam],
+    validated_config: Dict[str, Any],
+) -> List[PeriodParam]:
+    """
+    Validate that discovered raw periods exactly match the confirmed range.
+
+    The task fails before ClickHouse truncate if raw data is missing or contains
+    periods outside the explicitly confirmed full rebuild range.
+    """
+
+    from raw_discovery import (
+        format_periods,
+        validate_full_rebuild_raw_periods,
+    )
+
+    raw_period_tuples = [
+        (period["year"], period["month"])
+        for period in raw_periods
+    ]
+
+    validated_period_tuples = validate_full_rebuild_raw_periods(
+        raw_periods=raw_period_tuples,
+        expected_start_year=validated_config["expected_start_year"],
+        expected_start_month=validated_config["expected_start_month"],
+        expected_end_year=validated_config["expected_end_year"],
+        expected_end_month=validated_config["expected_end_month"],
+    )
+
+    print(
+        "Full rebuild validated raw periods: "
+        f"{format_periods(validated_period_tuples)}"
+    )
+
+    return [
+        {
+            "year": year,
+            "month": month,
+        }
+        for year, month in validated_period_tuples
+    ]
+
+
+@task(
+    task_id="log_full_rebuild_plan",
+    execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+)
+def log_full_rebuild_plan_task(
+    periods: List[PeriodParam],
+) -> None:
+    """
+    Log the validated full rebuild plan before ClickHouse truncate.
     """
 
     if not periods:
-        raise ValueError("Period refresh requires at least one selected period")
+        raise ValueError(
+            "Full rebuild requires at least one validated raw period. "
+            "ClickHouse truncate was not executed."
+        )
 
-    formatted_periods = ", ".join(format_period(period) for period in periods)
+    formatted_periods = ", ".join(
+        format_period(period)
+        for period in periods
+    )
 
-    print(f"Period refresh will process: {formatted_periods}")
+    print("Protected full rebuild plan validated")
+    print(f"Periods count: {len(periods)}")
+    print(f"Periods to rebuild: {formatted_periods}")
 
 
 @task_group(group_id="process_month")
 def process_month(period: PeriodParam) -> None:
     """
-    Refresh one selected monthly period from raw to ClickHouse.
+    Rebuild one validated raw monthly period from raw to ClickHouse.
 
-    This TaskGroup is dynamically mapped:
-        process_month[0] refreshes the first selected period;
-        process_month[1] refreshes the second selected period;
-        and so on.
+    This TaskGroup is dynamically mapped over all validated raw periods.
 
-    Inside each mapped group, the full monthly replacement pipeline is executed:
-        delete ClickHouse month
-        -> bronze
+    Inside each mapped group, the monthly full rebuild pipeline is executed:
+        bronze
         -> silver
         -> silver quality
         -> gold marts
         -> gold Object Storage quality
         -> ClickHouse load
         -> ClickHouse month quality
+
+    The TaskGroup does not delete an individual ClickHouse month because the
+    full rebuild DAG truncates all ClickHouse gold tables once before monthly
+    processing starts.
     """
 
-    @task(task_id="delete_clickhouse_gold_month", execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT)
-    def delete_clickhouse_gold_month_task(selected_period: PeriodParam) -> None:
-        run_shell_command(
-            build_python_job_command(
-                job_file="delete_clickhouse_gold_month.py",
-                period=selected_period,
-            )
-        )
-
-    @task(task_id="bronze_yellow_taxi", pool=SPARK_POOL, execution_timeout=BRONZE_TASK_EXECUTION_TIMEOUT)
-    def bronze_yellow_taxi_task(selected_period: PeriodParam) -> None:
+    @task(
+        task_id="bronze_yellow_taxi",
+        pool=SPARK_POOL,
+        execution_timeout=BRONZE_TASK_EXECUTION_TIMEOUT,
+    )
+    def bronze_yellow_taxi_task(
+        selected_period: PeriodParam,
+    ) -> None:
         run_shell_command(
             build_spark_job_command(
                 job_file="bronze_yellow_taxi.py",
@@ -330,8 +382,14 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="silver_yellow_taxi", pool=SPARK_POOL, execution_timeout=SILVER_TASK_EXECUTION_TIMEOUT)
-    def silver_yellow_taxi_task(selected_period: PeriodParam) -> None:
+    @task(
+        task_id="silver_yellow_taxi",
+        pool=SPARK_POOL,
+        execution_timeout=SILVER_TASK_EXECUTION_TIMEOUT,
+    )
+    def silver_yellow_taxi_task(
+        selected_period: PeriodParam,
+    ) -> None:
         run_shell_command(
             build_spark_job_command(
                 job_file="silver_yellow_taxi.py",
@@ -339,8 +397,14 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="check_yellow_taxi_quality", pool=SPARK_POOL, execution_timeout=SILVER_QUALITY_TASK_EXECUTION_TIMEOUT)
-    def check_yellow_taxi_quality_task(selected_period: PeriodParam) -> None:
+    @task(
+        task_id="check_yellow_taxi_quality",
+        pool=SPARK_POOL,
+        execution_timeout=SILVER_QUALITY_TASK_EXECUTION_TIMEOUT,
+    )
+    def check_yellow_taxi_quality_task(
+        selected_period: PeriodParam,
+    ) -> None:
         run_shell_command(
             build_spark_job_command(
                 job_file="check_yellow_taxi_quality.py",
@@ -348,8 +412,14 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="gold_hourly_trips", pool=SPARK_POOL, execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT)
-    def gold_hourly_trips_task(selected_period: PeriodParam) -> None:
+    @task(
+        task_id="gold_hourly_trips",
+        pool=SPARK_POOL,
+        execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+    )
+    def gold_hourly_trips_task(
+        selected_period: PeriodParam,
+    ) -> None:
         run_shell_command(
             build_spark_job_command(
                 job_file="gold_hourly_trips.py",
@@ -357,8 +427,14 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="gold_daily_trips", pool=SPARK_POOL, execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT)
-    def gold_daily_trips_task(selected_period: PeriodParam) -> None:
+    @task(
+        task_id="gold_daily_trips",
+        pool=SPARK_POOL,
+        execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+    )
+    def gold_daily_trips_task(
+        selected_period: PeriodParam,
+    ) -> None:
         run_shell_command(
             build_spark_job_command(
                 job_file="gold_daily_trips.py",
@@ -366,8 +442,14 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="gold_payment_type_stats", pool=SPARK_POOL, execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT)
-    def gold_payment_type_stats_task(selected_period: PeriodParam) -> None:
+    @task(
+        task_id="gold_payment_type_stats",
+        pool=SPARK_POOL,
+        execution_timeout=GOLD_STANDARD_TASK_EXECUTION_TIMEOUT,
+    )
+    def gold_payment_type_stats_task(
+        selected_period: PeriodParam,
+    ) -> None:
         run_shell_command(
             build_spark_job_command(
                 job_file="gold_payment_type_stats.py",
@@ -375,8 +457,14 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="gold_location_pair_stats", pool=SPARK_POOL, execution_timeout=GOLD_LOCATION_TASK_EXECUTION_TIMEOUT)
-    def gold_location_pair_stats_task(selected_period: PeriodParam) -> None:
+    @task(
+        task_id="gold_location_pair_stats",
+        pool=SPARK_POOL,
+        execution_timeout=GOLD_LOCATION_TASK_EXECUTION_TIMEOUT,
+    )
+    def gold_location_pair_stats_task(
+        selected_period: PeriodParam,
+    ) -> None:
         run_shell_command(
             build_spark_job_command(
                 job_file="gold_location_pair_stats.py",
@@ -384,8 +472,14 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="check_gold_schema", pool=SPARK_POOL, execution_timeout=GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT)
-    def check_gold_schema_task(selected_period: PeriodParam) -> None:
+    @task(
+        task_id="check_gold_schema",
+        pool=SPARK_POOL,
+        execution_timeout=GOLD_SCHEMA_TASK_EXECUTION_TIMEOUT,
+    )
+    def check_gold_schema_task(
+        selected_period: PeriodParam,
+    ) -> None:
         run_shell_command(
             build_spark_job_command(
                 job_file="check_gold_schema.py",
@@ -393,7 +487,11 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="load_gold_hourly_trips_to_clickhouse", pool=SPARK_POOL, execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT)
+    @task(
+        task_id="load_gold_hourly_trips_to_clickhouse",
+        pool=SPARK_POOL,
+        execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT,
+    )
     def load_gold_hourly_trips_to_clickhouse_task(
         selected_period: PeriodParam,
     ) -> None:
@@ -404,7 +502,11 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="load_gold_daily_trips_to_clickhouse", pool=SPARK_POOL, execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT)
+    @task(
+        task_id="load_gold_daily_trips_to_clickhouse",
+        pool=SPARK_POOL,
+        execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT,
+    )
     def load_gold_daily_trips_to_clickhouse_task(
         selected_period: PeriodParam,
     ) -> None:
@@ -415,7 +517,11 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="load_gold_payment_type_stats_to_clickhouse", pool=SPARK_POOL, execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT)
+    @task(
+        task_id="load_gold_payment_type_stats_to_clickhouse",
+        pool=SPARK_POOL,
+        execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT,
+    )
     def load_gold_payment_type_stats_to_clickhouse_task(
         selected_period: PeriodParam,
     ) -> None:
@@ -426,7 +532,11 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="load_gold_location_pair_stats_to_clickhouse", pool=SPARK_POOL, execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT)
+    @task(
+        task_id="load_gold_location_pair_stats_to_clickhouse",
+        pool=SPARK_POOL,
+        execution_timeout=CLICKHOUSE_LOAD_TASK_EXECUTION_TIMEOUT,
+    )
     def load_gold_location_pair_stats_to_clickhouse_task(
         selected_period: PeriodParam,
     ) -> None:
@@ -437,7 +547,10 @@ def process_month(period: PeriodParam) -> None:
             )
         )
 
-    @task(task_id="check_clickhouse_gold_month_quality", execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT)
+    @task(
+        task_id="check_clickhouse_gold_month_quality",
+        execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+    )
     def check_clickhouse_gold_month_quality_task(
         selected_period: PeriodParam,
     ) -> None:
@@ -447,8 +560,6 @@ def process_month(period: PeriodParam) -> None:
                 period=selected_period,
             )
         )
-
-    delete_clickhouse_gold_month = delete_clickhouse_gold_month_task(period)
 
     bronze = bronze_yellow_taxi_task(period)
     silver = silver_yellow_taxi_task(period)
@@ -469,8 +580,6 @@ def process_month(period: PeriodParam) -> None:
     check_clickhouse_gold_month_quality = (
         check_clickhouse_gold_month_quality_task(period)
     )
-
-    delete_clickhouse_gold_month >> bronze
 
     bronze >> silver >> check_quality >> [
         gold_hourly,
@@ -495,7 +604,7 @@ def process_month(period: PeriodParam) -> None:
 
 
 with DAG(
-    dag_id="nyc_taxi_period_refresh_pipeline",
+    dag_id="nyc_taxi_full_rebuild_pipeline",
     default_args=default_args,
     start_date=datetime(2024, 1, 1),
     schedule=None,
@@ -503,17 +612,20 @@ with DAG(
     max_active_runs=1,
     max_active_tasks=1,
     params={
-        "start_year": DEFAULT_START_YEAR,
-        "start_month": DEFAULT_START_MONTH,
-        "end_year": DEFAULT_END_YEAR,
-        "end_month": DEFAULT_END_MONTH,
-        "refresh_mode": DEFAULT_REFRESH_MODE,
+        "rebuild_mode": DEFAULT_REBUILD_MODE,
+        "confirm_full_rebuild": DEFAULT_CONFIRM_FULL_REBUILD,
+        "confirm_clickhouse_truncate": DEFAULT_CONFIRM_CLICKHOUSE_TRUNCATE,
+        "expected_start_year": DEFAULT_EXPECTED_START_YEAR,
+        "expected_start_month": DEFAULT_EXPECTED_START_MONTH,
+        "expected_end_year": DEFAULT_EXPECTED_END_YEAR,
+        "expected_end_month": DEFAULT_EXPECTED_END_MONTH,
     },
     tags=[
         "nyc_taxi",
         "spark",
         "clickhouse",
-        "period_refresh",
+        "full_rebuild",
+        "raw_discovery",
         "data_engineering",
     ],
 ) as dag:
@@ -527,23 +639,38 @@ with DAG(
         execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
     )
 
-    periods = read_period_refresh_config_task()
+    validated_config = validate_full_rebuild_config_task()
 
-    log_periods = log_period_refresh_periods(periods)
+    raw_periods = discover_full_rebuild_raw_periods_task()
 
-    process_selected_months = process_month.expand(period=periods)
+    validated_periods = validate_full_rebuild_raw_periods_task(
+        raw_periods=raw_periods,
+        validated_config=validated_config,
+    )
+
+    log_rebuild_plan = log_full_rebuild_plan_task(validated_periods)
+
+    truncate_clickhouse_gold_tables = BashOperator(
+        task_id="truncate_clickhouse_gold_tables",
+        bash_command=f"""
+        cd {PROJECT_DIR} &&
+        PYTHONPATH={JOBS_DIR} python jobs/truncate_clickhouse_gold_tables.py
+        """,
+        execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+    )
+
+    process_full_rebuild_months = process_month.expand(
+        period=validated_periods
+    )
 
     finish = EmptyOperator(
         task_id="finish",
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     )
 
-    create_clickhouse_gold_tables >> periods
+    create_clickhouse_gold_tables >> validated_config
+    validated_config >> raw_periods
 
-    periods >> log_periods
-    periods >> process_selected_months
-
-    [
-        log_periods,
-        process_selected_months,
-    ] >> finish
+    log_rebuild_plan >> truncate_clickhouse_gold_tables
+    truncate_clickhouse_gold_tables >> process_full_rebuild_months
+    process_full_rebuild_months >> finish

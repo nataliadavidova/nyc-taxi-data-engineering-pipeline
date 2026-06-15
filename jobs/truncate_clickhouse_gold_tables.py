@@ -45,7 +45,7 @@ def main() -> None:
 
     validate_config()
 
-    for table_name in GOLD_TABLES:
+    for table_name in GOLD_CLICKHOUSE_TABLES:
         truncate_gold_table(table_name)
 
     print("ClickHouse gold tables truncated successfully")

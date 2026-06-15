@@ -42,6 +42,7 @@ from typing import Any, Dict, List
 from clickhouse_utils import fetch_json_data, fetch_single_json_row
 from config import (
     CLICKHOUSE_DATABASE,
+    GOLD_CLICKHOUSE_TABLES,
     validate_config,
 )
 
@@ -49,7 +50,7 @@ from config import (
 EXPECTED_MIN_DATE = "2024-01-01"
 EXPECTED_MAX_DATE = "2024-12-31"
 
-GOLD_TABLES: List[str] = [
+GOLD_CLICKHOUSE_TABLES: List[str] = [
     "gold_daily_trips",
     "gold_hourly_trips",
     "gold_payment_type_stats",
@@ -72,7 +73,7 @@ def assert_gold_tables_exist() -> None:
     one query per table.
     """
 
-    table_names_sql = ", ".join(f"'{table_name}'" for table_name in GOLD_TABLES)
+    table_names_sql = ", ".join(f"'{table_name}'" for table_name in GOLD_CLICKHOUSE_TABLES)
 
     query = f"""
     SELECT name
@@ -84,7 +85,7 @@ def assert_gold_tables_exist() -> None:
 
     rows = fetch_json_data(query)
     found_tables = {row["name"] for row in rows}
-    expected_tables = set(GOLD_TABLES)
+    expected_tables = set(GOLD_CLICKHOUSE_TABLES)
 
     missing_tables = sorted(expected_tables - found_tables)
 
@@ -344,7 +345,7 @@ def main() -> None:
 
     assert_gold_tables_exist()
 
-    for table_name in GOLD_TABLES:
+    for table_name in GOLD_CLICKHOUSE_TABLES:
         check_gold_table_quality(table_name)
 
     print()

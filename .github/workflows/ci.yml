@@ -37,7 +37,7 @@ jobs:
 
       - name: Check Python syntax
         run: |
-          PYTHONPATH=jobs python -m py_compile dags/nyc_taxi_pipeline.py jobs/*.py
+          PYTHONPATH=jobs python -m py_compile dags/nyc_taxi_full_rebuild_pipeline.py jobs/*.py
 
       - name: Run tests
         run: |
