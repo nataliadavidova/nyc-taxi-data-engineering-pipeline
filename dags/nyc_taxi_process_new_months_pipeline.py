@@ -11,7 +11,7 @@ Current approach:
     new periods       = raw periods - processed periods.
 
 Why this DAG exists:
-    nyc_taxi_pipeline.py performs a controlled full-year rebuild.
+    nyc_taxi_full_rebuild_pipeline.py performs a controlled full-year rebuild.
     nyc_taxi_period_refresh_pipeline.py performs manual period replacement.
     This DAG adds automatic new-month discovery as a foundation for incremental
     monthly processing.

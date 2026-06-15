@@ -259,3 +259,166 @@ def test_format_periods():
 
 def test_format_periods_handles_empty_list():
     assert discovery.format_periods([]) == "none"
+
+
+def test_build_expected_periods_for_same_year_range():
+    assert discovery.build_expected_periods(
+        start_year="2024",
+        start_month="01",
+        end_year="2024",
+        end_month="03",
+    ) == [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "03"),
+    ]
+
+
+def test_build_expected_periods_for_cross_year_range():
+    assert discovery.build_expected_periods(
+        start_year="2023",
+        start_month="11",
+        end_year="2024",
+        end_month="02",
+    ) == [
+        ("2023", "11"),
+        ("2023", "12"),
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+
+
+def test_find_missing_periods_returns_expected_missing_months():
+    discovered_periods = [
+        ("2024", "01"),
+        ("2024", "03"),
+    ]
+    expected_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "03"),
+    ]
+
+    assert discovery.find_missing_periods(
+        discovered_periods=discovered_periods,
+        expected_periods=expected_periods,
+    ) == [("2024", "02")]
+
+
+def test_find_unexpected_periods_returns_periods_outside_expected_range():
+    discovered_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "03"),
+    ]
+    expected_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+    ]
+
+    assert discovery.find_unexpected_periods(
+        discovered_periods=discovered_periods,
+        expected_periods=expected_periods,
+    ) == [("2024", "03")]
+
+
+def test_validate_full_rebuild_raw_periods_returns_expected_periods_when_complete():
+    raw_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "03"),
+    ]
+
+    assert discovery.validate_full_rebuild_raw_periods(
+        raw_periods=raw_periods,
+        expected_start_year="2024",
+        expected_start_month="01",
+        expected_end_year="2024",
+        expected_end_month="03",
+    ) == [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "03"),
+    ]
+
+
+def test_validate_full_rebuild_raw_periods_sorts_and_deduplicates_raw_periods():
+    raw_periods = [
+        ("2024", "03"),
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "02"),
+    ]
+
+    assert discovery.validate_full_rebuild_raw_periods(
+        raw_periods=raw_periods,
+        expected_start_year="2024",
+        expected_start_month="01",
+        expected_end_year="2024",
+        expected_end_month="03",
+    ) == [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "03"),
+    ]
+
+
+def test_validate_full_rebuild_raw_periods_rejects_empty_raw_source():
+    with pytest.raises(ValueError, match="no raw Yellow Taxi periods"):
+        discovery.validate_full_rebuild_raw_periods(
+            raw_periods=[],
+            expected_start_year="2024",
+            expected_start_month="01",
+            expected_end_year="2024",
+            expected_end_month="03",
+        )
+
+
+def test_validate_full_rebuild_raw_periods_rejects_missing_periods():
+    raw_periods = [
+        ("2024", "01"),
+        ("2024", "03"),
+    ]
+
+    with pytest.raises(ValueError, match="Missing periods: 2024-02"):
+        discovery.validate_full_rebuild_raw_periods(
+            raw_periods=raw_periods,
+            expected_start_year="2024",
+            expected_start_month="01",
+            expected_end_year="2024",
+            expected_end_month="03",
+        )
+
+
+def test_validate_full_rebuild_raw_periods_rejects_unexpected_periods():
+    raw_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "03"),
+    ]
+
+    with pytest.raises(ValueError, match="Unexpected periods: 2024-03"):
+        discovery.validate_full_rebuild_raw_periods(
+            raw_periods=raw_periods,
+            expected_start_year="2024",
+            expected_start_month="01",
+            expected_end_year="2024",
+            expected_end_month="02",
+        )
+
+
+def test_validate_full_rebuild_raw_periods_rejects_incomplete_source_before_truncate():
+    raw_periods = [
+        ("2024", "01"),
+        ("2024", "02"),
+        ("2024", "03"),
+    ]
+
+    with pytest.raises(ValueError, match="ClickHouse truncate was not executed"):
+        discovery.validate_full_rebuild_raw_periods(
+            raw_periods=raw_periods,
+            expected_start_year="2023",
+            expected_start_month="12",
+            expected_end_year="2024",
+            expected_end_month="03",
+        )

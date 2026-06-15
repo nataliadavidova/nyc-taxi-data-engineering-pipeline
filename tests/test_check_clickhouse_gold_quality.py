@@ -5,7 +5,7 @@ import check_clickhouse_gold_quality as ch_quality
 from check_clickhouse_gold_quality import (
     EXPECTED_MAX_DATE,
     EXPECTED_MIN_DATE,
-    GOLD_TABLES,
+    GOLD_CLICKHOUSE_TABLES,
     build_quality_query,
     empty_string_count_expression,
     validate_common_table_metrics,
@@ -87,7 +87,7 @@ def test_assert_gold_tables_exist_passes_when_all_expected_tables_exist(monkeypa
     monkeypatch.setattr(
         ch_quality,
         "fetch_json_data",
-        lambda query: [{"name": table_name} for table_name in GOLD_TABLES],
+        lambda query: [{"name": table_name} for table_name in GOLD_CLICKHOUSE_TABLES],
     )
 
     ch_quality.assert_gold_tables_exist()
@@ -96,7 +96,7 @@ def test_assert_gold_tables_exist_passes_when_all_expected_tables_exist(monkeypa
 def test_assert_gold_tables_exist_fails_when_table_is_missing(monkeypatch):
     existing_tables = [
         table_name
-        for table_name in GOLD_TABLES
+        for table_name in GOLD_CLICKHOUSE_TABLES
         if table_name != "gold_daily_trips"
     ]
 

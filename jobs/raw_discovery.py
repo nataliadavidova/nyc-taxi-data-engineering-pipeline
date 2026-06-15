@@ -151,6 +151,141 @@ def find_new_periods(
     return sorted(raw_set - processed_set, key=period_sort_key)
 
 
+def build_expected_periods(
+    start_year: YearMonthValue,
+    start_month: YearMonthValue,
+    end_year: YearMonthValue,
+    end_month: YearMonthValue,
+) -> List[Period]:
+    """
+    Build a complete chronological list of expected periods.
+    """
+
+    (
+        normalized_start_year,
+        normalized_start_month,
+        normalized_end_year,
+        normalized_end_month,
+    ) = validate_month_period_range(
+        start_year=start_year,
+        start_month=start_month,
+        end_year=end_year,
+        end_month=end_month,
+    )
+
+    periods: List[Period] = []
+
+    current_year = normalized_start_year
+    current_month = normalized_start_month
+
+    while (current_year, current_month) <= (
+        normalized_end_year,
+        normalized_end_month,
+    ):
+        periods.append((str(current_year), f"{current_month:02d}"))
+
+        if current_month == 12:
+            current_year += 1
+            current_month = 1
+        else:
+            current_month += 1
+
+    return periods
+
+
+def find_missing_periods(
+    discovered_periods: Iterable[Period],
+    expected_periods: Iterable[Period],
+) -> List[Period]:
+    """
+    Return expected periods that are missing from discovered raw periods.
+    """
+
+    discovered_set = {
+        normalize_period(year, month) for year, month in discovered_periods
+    }
+    expected_set = {
+        normalize_period(year, month) for year, month in expected_periods
+    }
+
+    return sorted(expected_set - discovered_set, key=period_sort_key)
+
+
+def find_unexpected_periods(
+    discovered_periods: Iterable[Period],
+    expected_periods: Iterable[Period],
+) -> List[Period]:
+    """
+    Return discovered raw periods that are outside the expected rebuild range.
+    """
+
+    discovered_set = {
+        normalize_period(year, month) for year, month in discovered_periods
+    }
+    expected_set = {
+        normalize_period(year, month) for year, month in expected_periods
+    }
+
+    return sorted(discovered_set - expected_set, key=period_sort_key)
+
+
+def validate_full_rebuild_raw_periods(
+    raw_periods: Iterable[Period],
+    expected_start_year: YearMonthValue,
+    expected_start_month: YearMonthValue,
+    expected_end_year: YearMonthValue,
+    expected_end_month: YearMonthValue,
+) -> List[Period]:
+    """
+    Validate that discovered raw periods exactly match the expected full rebuild range.
+
+    This protects destructive full rebuilds from truncating ClickHouse when the
+    raw source is incomplete or contains periods outside the confirmed range.
+    """
+
+    discovered_periods = sorted(
+        {
+            normalize_period(year, month)
+            for year, month in raw_periods
+        },
+        key=period_sort_key,
+    )
+
+    if not discovered_periods:
+        raise ValueError(
+            "Full rebuild raw source validation failed: no raw Yellow Taxi "
+            "periods were discovered. ClickHouse truncate was not executed."
+        )
+
+    expected_periods = build_expected_periods(
+        start_year=expected_start_year,
+        start_month=expected_start_month,
+        end_year=expected_end_year,
+        end_month=expected_end_month,
+    )
+
+    missing_periods = find_missing_periods(
+        discovered_periods=discovered_periods,
+        expected_periods=expected_periods,
+    )
+    unexpected_periods = find_unexpected_periods(
+        discovered_periods=discovered_periods,
+        expected_periods=expected_periods,
+    )
+
+    if missing_periods or unexpected_periods:
+        raise ValueError(
+            "Full rebuild raw source validation failed. "
+            f"Expected periods: {format_periods(expected_periods)}. "
+            f"Discovered periods: {format_periods(discovered_periods)}. "
+            f"Missing periods: {format_periods(missing_periods)}. "
+            f"Unexpected periods: {format_periods(unexpected_periods)}. "
+            "ClickHouse truncate was not executed."
+        )
+
+    return expected_periods
+
+
 def get_raw_yellow_prefix() -> str:
     """
     Return Object Storage prefix for raw Yellow Taxi files.
