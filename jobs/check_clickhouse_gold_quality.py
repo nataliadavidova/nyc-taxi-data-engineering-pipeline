@@ -7,7 +7,7 @@ have been loaded into ClickHouse.
 Checks:
 - all expected gold tables exist;
 - all gold tables are not empty;
-- pickup_date range covers the expected full year;
+- pickup_date range covers the complete discovered raw source range;
 - trip_type is populated for hourly, payment, and location marts;
 - location mart has non-empty pickup/dropoff zone names;
 - payment mart has non-empty payment type names.
@@ -37,7 +37,8 @@ Optimization decisions:
    - query result columns can be accessed by alias names.
 """
 
-from typing import Any, Dict, List
+from calendar import monthrange
+from typing import Any, Dict, List, Tuple
 
 from clickhouse_utils import fetch_json_data, fetch_single_json_row
 from config import (
@@ -45,23 +46,53 @@ from config import (
     GOLD_CLICKHOUSE_TABLES,
     validate_config,
 )
+from raw_discovery import list_raw_yellow_periods
 
-
-EXPECTED_MIN_DATE = "2024-01-01"
-EXPECTED_MAX_DATE = "2024-12-31"
-
-GOLD_CLICKHOUSE_TABLES: List[str] = [
-    "gold_daily_trips",
-    "gold_hourly_trips",
-    "gold_payment_type_stats",
-    "gold_location_pair_stats",
-]
 
 TABLES_WITH_TRIP_TYPE: List[str] = [
     "gold_hourly_trips",
     "gold_payment_type_stats",
     "gold_location_pair_stats",
 ]
+
+
+def get_expected_date_range() -> Tuple[str, str]:
+    """
+    Build the expected ClickHouse date range from discovered raw periods.
+
+    The first expected date is the first calendar day of the earliest raw
+    month. The last expected date is the final calendar day of the latest raw
+    month.
+
+    This avoids hardcoding a historical range such as 2024 or 2016-2025.
+    """
+
+    raw_periods = list_raw_yellow_periods()
+
+    if not raw_periods:
+        raise AssertionError(
+            "Cannot determine expected ClickHouse date range: "
+            "no raw Yellow Taxi periods were discovered"
+        )
+
+    first_year_raw, first_month_raw = raw_periods[0]
+    last_year_raw, last_month_raw = raw_periods[-1]
+
+    first_year = int(first_year_raw)
+    first_month = int(first_month_raw)
+    last_year = int(last_year_raw)
+    last_month = int(last_month_raw)
+
+    last_day = monthrange(last_year, last_month)[1]
+
+    expected_min_date = (
+        f"{first_year:04d}-{first_month:02d}-01"
+    )
+    expected_max_date = (
+        f"{last_year:04d}-{last_month:02d}-{last_day:02d}"
+    )
+
+    return expected_min_date, expected_max_date
 
 
 def assert_gold_tables_exist() -> None:
@@ -180,6 +211,8 @@ def build_quality_query(table_name: str) -> str:
 def validate_common_table_metrics(
     table_name: str,
     metrics: Dict[str, Any],
+    expected_min_date: str,
+    expected_max_date: str,
 ) -> None:
     """
     Validate common quality metrics for all gold tables.
@@ -206,18 +239,18 @@ def validate_common_table_metrics(
     )
 
     if (
-        min_pickup_date != EXPECTED_MIN_DATE
-        or max_pickup_date != EXPECTED_MAX_DATE
+        min_pickup_date != expected_min_date
+        or max_pickup_date != expected_max_date
     ):
         raise AssertionError(
             f"Unexpected pickup_date range for {table_name}: "
             f"{min_pickup_date} → {max_pickup_date}. "
-            f"Expected: {EXPECTED_MIN_DATE} → {EXPECTED_MAX_DATE}"
+            f"Expected: {expected_min_date} → {expected_max_date}"
         )
 
     print(
         f"Date range is valid for {table_name}: "
-        f"{EXPECTED_MIN_DATE} → {EXPECTED_MAX_DATE}"
+        f"{expected_min_date} → {expected_max_date}"
     )
 
 
@@ -315,7 +348,11 @@ def validate_payment_metrics(
     )
 
 
-def check_gold_table_quality(table_name: str) -> None:
+def check_gold_table_quality(
+    table_name: str,
+    expected_min_date: str,
+    expected_max_date: str,
+) -> None:
     """
     Run all quality checks for one gold table using one aggregate query.
     """
@@ -328,7 +365,12 @@ def check_gold_table_quality(table_name: str) -> None:
     quality_query = build_quality_query(table_name)
     metrics = fetch_single_json_row(quality_query)
 
-    validate_common_table_metrics(table_name, metrics)
+    validate_common_table_metrics(
+        table_name,
+        metrics,
+        expected_min_date,
+        expected_max_date,
+    )
     validate_trip_type_metrics(table_name, metrics)
     validate_location_metrics(table_name, metrics)
     validate_payment_metrics(table_name, metrics)
@@ -339,14 +381,25 @@ def check_gold_table_quality(table_name: str) -> None:
 def main() -> None:
     validate_config()
 
+    expected_min_date, expected_max_date = (
+        get_expected_date_range()
+    )
+
     print("Starting ClickHouse gold quality checks")
     print(f"Database: {CLICKHOUSE_DATABASE}")
-    print(f"Expected pickup_date range: {EXPECTED_MIN_DATE} → {EXPECTED_MAX_DATE}")
+    print(
+        "Expected pickup_date range: "
+        f"{expected_min_date} → {expected_max_date}"
+    )
 
     assert_gold_tables_exist()
 
     for table_name in GOLD_CLICKHOUSE_TABLES:
-        check_gold_table_quality(table_name)
+        check_gold_table_quality(
+            table_name,
+            expected_min_date,
+            expected_max_date,
+        )
 
     print()
     print("ClickHouse gold quality checks passed successfully")

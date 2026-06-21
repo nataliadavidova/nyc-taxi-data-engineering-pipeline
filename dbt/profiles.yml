@@ -1,0 +1,22 @@
+nyc_taxi_analytics_dbt:
+  target: dev
+
+  outputs:
+    dev:
+      type: clickhouse
+      driver: http
+
+      host: "{{ env_var('CLICKHOUSE_HOST') }}"
+      port: "{{ env_var('CLICKHOUSE_PORT') | int }}"
+      user: "{{ env_var('CLICKHOUSE_USER') }}"
+      password: "{{ env_var('CLICKHOUSE_PASSWORD') }}"
+
+      schema: "{{ env_var('DBT_TARGET_DATABASE') }}"
+
+      secure: false
+      verify: false
+
+      connect_timeout: 10
+      send_receive_timeout: 300
+      retries: 1
+      threads: 4

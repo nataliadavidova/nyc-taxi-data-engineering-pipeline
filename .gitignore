@@ -36,3 +36,9 @@ standalone_admin_password.txt
 # IDE / editor
 .idea/
 .vscode/
+
+# dbt generated artifacts
+dbt/.user.yml
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/

@@ -1,0 +1,81 @@
+version: 2
+
+models:
+  - name: stg_location_pair_stats
+    description: >
+      Staging view over the Spark-managed gold_location_pair_stats table.
+      The model preserves the route-level daily grain of pickup date,
+      trip type, pickup location, and dropoff location.
+
+    columns:
+      - name: pickup_date
+        description: Calendar date of taxi trip pickup activity.
+        data_tests:
+          - not_null
+
+      - name: trip_type
+        description: Trip distance category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - short
+                  - medium
+                  - long
+
+      - name: pickup_location_id
+        description: TLC taxi zone ID where the trip started.
+        data_tests:
+          - not_null
+
+      - name: pickup_borough
+        description: Pickup borough name. Nullable when the zone lookup has no match.
+
+      - name: pickup_zone
+        description: Pickup taxi zone name. Nullable when the zone lookup has no match.
+
+      - name: pickup_service_zone
+        description: Pickup service zone. Nullable when the zone lookup has no match.
+
+      - name: dropoff_location_id
+        description: TLC taxi zone ID where the trip ended.
+        data_tests:
+          - not_null
+
+      - name: dropoff_borough
+        description: Dropoff borough name. Nullable when the zone lookup has no match.
+
+      - name: dropoff_zone
+        description: Dropoff taxi zone name. Nullable when the zone lookup has no match.
+
+      - name: dropoff_service_zone
+        description: Dropoff service zone. Nullable when the zone lookup has no match.
+
+      - name: trips_count
+        description: Number of trips for the date, trip type, and pickup/dropoff location pair.
+        data_tests:
+          - not_null
+
+      - name: total_revenue
+        description: Total revenue for the date, trip type, and pickup/dropoff location pair.
+        data_tests:
+          - not_null
+
+      - name: avg_check
+        description: Average revenue per trip.
+
+      - name: avg_trip_distance
+        description: Average trip distance.
+
+      - name: avg_trip_duration_minutes
+        description: Average trip duration in minutes.
+
+      - name: year
+        description: Source year partition value.
+
+      - name: month
+        description: Source month partition value.
+
+      - name: gold_load_timestamp
+        description: Timestamp when the Gold record was generated.

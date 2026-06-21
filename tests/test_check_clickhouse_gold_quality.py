@@ -3,16 +3,19 @@ import pytest
 
 import check_clickhouse_gold_quality as ch_quality
 from check_clickhouse_gold_quality import (
-    EXPECTED_MAX_DATE,
-    EXPECTED_MIN_DATE,
     GOLD_CLICKHOUSE_TABLES,
     build_quality_query,
     empty_string_count_expression,
+    get_expected_date_range,
     validate_common_table_metrics,
     validate_location_metrics,
     validate_payment_metrics,
     validate_trip_type_metrics,
 )
+
+
+TEST_EXPECTED_MIN_DATE = "2016-01-01"
+TEST_EXPECTED_MAX_DATE = "2025-12-31"
 
 
 def test_empty_string_count_expression_builds_clickhouse_count_if():
@@ -110,25 +113,88 @@ def test_assert_gold_tables_exist_fails_when_table_is_missing(monkeypatch):
         ch_quality.assert_gold_tables_exist()
 
 
+def test_get_expected_date_range_uses_first_and_last_raw_period(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        ch_quality,
+        "list_raw_yellow_periods",
+        lambda: [
+            (2016, "01"),
+            (2016, "02"),
+            (2025, "11"),
+            (2025, "12"),
+        ],
+    )
+
+    assert get_expected_date_range() == (
+        "2016-01-01",
+        "2025-12-31",
+    )
+
+
+def test_get_expected_date_range_uses_last_day_of_month(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        ch_quality,
+        "list_raw_yellow_periods",
+        lambda: [
+            (2024, "02"),
+        ],
+    )
+
+    assert get_expected_date_range() == (
+        "2024-02-01",
+        "2024-02-29",
+    )
+
+
+def test_get_expected_date_range_fails_when_no_raw_periods(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        ch_quality,
+        "list_raw_yellow_periods",
+        lambda: [],
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="no raw Yellow Taxi periods were discovered",
+    ):
+        get_expected_date_range()
+
+
 def test_validate_common_table_metrics_passes_for_valid_metrics():
     metrics = {
         "rows_count": 100,
-        "min_pickup_date": EXPECTED_MIN_DATE,
-        "max_pickup_date": EXPECTED_MAX_DATE,
+        "min_pickup_date": TEST_EXPECTED_MIN_DATE,
+        "max_pickup_date": TEST_EXPECTED_MAX_DATE,
     }
 
-    validate_common_table_metrics("gold_daily_trips", metrics)
+    validate_common_table_metrics(
+        "gold_daily_trips",
+        metrics,
+        TEST_EXPECTED_MIN_DATE,
+        TEST_EXPECTED_MAX_DATE,
+    )
 
 
 def test_validate_common_table_metrics_fails_for_empty_table():
     metrics = {
         "rows_count": 0,
-        "min_pickup_date": EXPECTED_MIN_DATE,
-        "max_pickup_date": EXPECTED_MAX_DATE,
+        "min_pickup_date": TEST_EXPECTED_MIN_DATE,
+        "max_pickup_date": TEST_EXPECTED_MAX_DATE,
     }
 
     with pytest.raises(AssertionError, match="to be non-empty"):
-        validate_common_table_metrics("gold_daily_trips", metrics)
+        validate_common_table_metrics(
+            "gold_daily_trips",
+            metrics,
+            TEST_EXPECTED_MIN_DATE,
+            TEST_EXPECTED_MAX_DATE,
+        )
 
 
 def test_validate_common_table_metrics_fails_for_wrong_date_range():
@@ -138,8 +204,16 @@ def test_validate_common_table_metrics_fails_for_wrong_date_range():
         "max_pickup_date": "2024-01-31",
     }
 
-    with pytest.raises(AssertionError, match="Unexpected pickup_date range"):
-        validate_common_table_metrics("gold_daily_trips", metrics)
+    with pytest.raises(
+        AssertionError,
+        match="Unexpected pickup_date range",
+    ):
+        validate_common_table_metrics(
+            "gold_daily_trips",
+            metrics,
+            TEST_EXPECTED_MIN_DATE,
+            TEST_EXPECTED_MAX_DATE,
+        )
 
 
 def test_validate_trip_type_metrics_skips_daily_table():
@@ -221,3 +295,21 @@ def test_validate_payment_metrics_fails_for_empty_payment_type_name():
 
     with pytest.raises(AssertionError, match="empty payment_type_name"):
         validate_payment_metrics("gold_payment_type_stats", metrics)
+
+
+def test_get_expected_date_range_accepts_string_year_and_month(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        ch_quality,
+        "list_raw_yellow_periods",
+        lambda: [
+            ("2025", "01"),
+            ("2025", "06"),
+        ],
+    )
+
+    assert get_expected_date_range() == (
+        "2025-01-01",
+        "2025-06-30",
+    )

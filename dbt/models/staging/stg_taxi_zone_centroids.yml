@@ -1,0 +1,35 @@
+version: 2
+
+models:
+  - name: stg_taxi_zone_centroids
+    description: >
+      Staging view over the taxi zone centroid reference table.
+      The source may contain multiple coordinate points for the same
+      TLC taxi zone location_id, so location_id is not enforced as unique
+      at the staging layer.
+
+    columns:
+      - name: location_id
+        description: TLC taxi zone location ID.
+        data_tests:
+          - not_null
+
+      - name: borough
+        description: NYC borough or special taxi zone area.
+        data_tests:
+          - not_null
+
+      - name: zone
+        description: Taxi zone name.
+        data_tests:
+          - not_null
+
+      - name: longitude
+        description: Longitude of the taxi zone centroid point.
+        data_tests:
+          - not_null
+
+      - name: latitude
+        description: Latitude of the taxi zone centroid point.
+        data_tests:
+          - not_null
