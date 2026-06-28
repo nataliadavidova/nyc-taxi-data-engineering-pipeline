@@ -89,12 +89,14 @@ services:
       - ./tests:/opt/airflow/tests
       - ./sql:/opt/airflow/sql
       - ./docs:/opt/airflow/docs
+      - /var/run/docker.sock:/var/run/docker.sock
     command: >
       bash -c "
       airflow scheduler &
       airflow webserver --port 8080
       "
   dbt:
+    image: nyc_taxi_dbt:latest
     build:
       context: .
       dockerfile: docker/dbt/Dockerfile
@@ -151,3 +153,8 @@ services:
 volumes:
   postgres_data:
   clickhouse_data:
+
+
+networks:
+  default:
+    name: nyc_taxi_network

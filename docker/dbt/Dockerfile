@@ -21,5 +21,6 @@ RUN python -m pip install --upgrade pip \
         "dbt-core==${DBT_CORE_VERSION}" \
         "dbt-clickhouse==${DBT_CLICKHOUSE_VERSION}" \
     && dbt --version
+COPY dbt/ /usr/app/dbt/
 
 ENTRYPOINT ["dbt"]
