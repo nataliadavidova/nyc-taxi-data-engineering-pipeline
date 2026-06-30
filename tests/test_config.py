@@ -2,6 +2,8 @@ import importlib
 import sys
 from pathlib import Path
 
+import dotenv
+
 # Add jobs directory to Python path so tests can import config.py
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 JOBS_DIR = PROJECT_ROOT / "jobs"
@@ -133,6 +135,7 @@ def test_telegram_alerting_settings_defaults(monkeypatch):
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
     monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
     monkeypatch.delenv("TELEGRAM_API_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *args, **kwargs: False)
 
     reloaded_config = importlib.reload(config)
 
