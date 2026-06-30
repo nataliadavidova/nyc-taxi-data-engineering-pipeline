@@ -10,16 +10,26 @@ nyc_taxi_full_rebuild_pipeline
 
 The full rebuild is destructive because it truncates all configured ClickHouse Gold tables before reloading validated raw periods.
 
+After a successful full rebuild, Airflow triggers the downstream dbt analytics pipeline:
+
+```text
+nyc_taxi_dbt_analytics_pipeline
+```
+
+This rebuilds and validates dbt analytics models from the refreshed ClickHouse Gold source tables.
+
 ## Current Source Range
 
 The current Object Storage source contains:
 
 ```text
-120 consecutive monthly periods
-2016-01 → 2025-12
+121 consecutive monthly periods
+2016-01 → 2026-01
 ```
 
 The confirmed expected range must exactly match the periods discovered at runtime.
+
+The current serving layer contains `2026-01`, which was added after the initial validated historical full rebuild through the new-month processing pipeline.
 
 ## Safety Model
 
@@ -71,6 +81,10 @@ docker compose exec airflow airflow dags list-runs \
 docker compose exec airflow airflow dags list-runs \
   -d nyc_taxi_process_new_months_pipeline \
   --state running
+
+docker compose exec airflow airflow dags list-runs \
+  -d nyc_taxi_dbt_analytics_pipeline \
+  --state running
 ```
 
 All commands should return:
@@ -97,6 +111,12 @@ Expected local configuration:
 ```text
 pool: spark_pool
 slots: 1
+```
+
+Check Docker services:
+
+```bash
+docker compose ps
 ```
 
 Keep Docker and the host machine running for the entire rebuild.
@@ -129,9 +149,9 @@ PY"
 Expected result for the current source:
 
 ```text
-Raw period count: 120
+Raw period count: 121
 First raw period: 2016-01
-Last raw period: 2025-12
+Last raw period: 2026-01
 ```
 
 ## Capture ClickHouse Baseline
@@ -169,9 +189,18 @@ cat /tmp/full_rebuild_before.tsv
 
 The baseline is useful for negative safety tests and operational comparison.
 
+For the current serving layer, the expected baseline after `2026-01` processing is:
+
+```text
+gold_daily_trips                 3,684
+gold_hourly_trips                265,201
+gold_payment_type_stats          52,458
+gold_location_pair_stats         39,815,396
+```
+
 ## Trigger Configuration
 
-Required Airflow Trigger DAG config:
+Required Airflow Trigger DAG config for the current raw source:
 
 ```json
 {
@@ -180,8 +209,8 @@ Required Airflow Trigger DAG config:
   "confirm_clickhouse_truncate": true,
   "expected_start_year": "2016",
   "expected_start_month": "01",
-  "expected_end_year": "2025",
-  "expected_end_month": "12"
+  "expected_end_year": "2026",
+  "expected_end_month": "01"
 }
 ```
 
@@ -198,8 +227,8 @@ docker compose exec airflow airflow dags trigger \
     "confirm_clickhouse_truncate": true,
     "expected_start_year": "2016",
     "expected_start_month": "01",
-    "expected_end_year": "2025",
-    "expected_end_month": "12"
+    "expected_end_year": "2026",
+    "expected_end_month": "01"
   }' \
   nyc_taxi_full_rebuild_pipeline
 
@@ -250,6 +279,19 @@ Bronze
 → ClickHouse month quality
 ```
 
+After all monthly processing succeeds, the DAG triggers the dbt analytics pipeline:
+
+```text
+nyc_taxi_dbt_analytics_pipeline
+```
+
+The dbt child DAG runs:
+
+```text
+dbt debug
+→ dbt build
+```
+
 The local configuration keeps tasks sequential:
 
 ```text
@@ -289,6 +331,8 @@ upstream_failed
 
 The shared Airflow callback writes structured failure details to task logs and can send an optional Telegram alert.
 
+If the dbt child DAG fails, the dbt trigger task in the parent full rebuild DAG fails when it waits for completion.
+
 ## Important Availability Limitation
 
 The current implementation truncates active ClickHouse Gold tables before monthly loading begins.
@@ -300,7 +344,7 @@ During the rebuild:
 * Superset may show incomplete data;
 * a failed run may leave the serving layer partially loaded.
 
-Do not trigger period refresh or new-month processing while the full rebuild is active.
+Do not trigger period refresh, new-month processing, or manual dbt rebuild while the full rebuild is active.
 
 ## Recovery After a Monthly Failure
 
@@ -317,78 +361,147 @@ Do not restart the entire full rebuild automatically without checking the curren
 
 The current implementation does not yet provide atomic publication or automatic rollback.
 
+## Recovery After a dbt Failure
+
+If the Spark and ClickHouse part of the full rebuild succeeds but the downstream dbt analytics DAG fails:
+
+1. Inspect the failed `dbt_debug` or `dbt_build_analytics_layer` task log.
+2. Confirm whether the failure is caused by ClickHouse connectivity, dbt model logic, dbt tests, or runtime configuration.
+3. Fix the underlying issue.
+4. Re-run the dbt analytics pipeline after the issue is fixed.
+
+Manual dbt validation through Airflow:
+
+```bash
+docker compose exec airflow bash -lc \
+"airflow tasks test nyc_taxi_dbt_analytics_pipeline dbt_debug 2026-01-03"
+```
+
+```bash
+docker compose exec airflow bash -lc \
+"airflow tasks test nyc_taxi_dbt_analytics_pipeline dbt_build_analytics_layer 2026-01-03"
+```
+
 ## Final Validation
 
 After the DAG finishes successfully, confirm that every expected period exists in all four Gold tables.
 
 Check the date range:
 
-```sql
-SELECT
-    min(pickup_date) AS min_pickup_date,
-    max(pickup_date) AS max_pickup_date
-FROM nyc_taxi.gold_daily_trips;
-```
-
-Check period counts:
-
-```sql
-SELECT
-    table,
-    uniqExact((year, month)) AS period_count
-FROM
-(
-    SELECT 'gold_daily_trips' AS table, year, month
+```bash
+docker compose exec -T clickhouse bash -lc '
+clickhouse-client \
+  --user "$CLICKHOUSE_USER" \
+  --password "$CLICKHOUSE_PASSWORD" \
+  --query "
+    SELECT
+        min(pickup_date) AS min_pickup_date,
+        max(pickup_date) AS max_pickup_date
     FROM nyc_taxi.gold_daily_trips
-
-    UNION ALL
-
-    SELECT 'gold_hourly_trips', year, month
-    FROM nyc_taxi.gold_hourly_trips
-
-    UNION ALL
-
-    SELECT 'gold_payment_type_stats', year, month
-    FROM nyc_taxi.gold_payment_type_stats
-
-    UNION ALL
-
-    SELECT 'gold_location_pair_stats', year, month
-    FROM nyc_taxi.gold_location_pair_stats
-)
-GROUP BY table
-ORDER BY table;
+    FORMAT Vertical
+  "
+'
 ```
 
 Expected result for the current source:
 
 ```text
-120 periods in every Gold table
+min_pickup_date: 2016-01-01
+max_pickup_date: 2026-01-31
 ```
 
-Capture final row counts:
+Check period counts and row counts:
 
 ```bash
-docker compose exec clickhouse clickhouse-client \
+docker compose exec -T clickhouse bash -lc '
+clickhouse-client \
   --user "$CLICKHOUSE_USER" \
   --password "$CLICKHOUSE_PASSWORD" \
-  --database "$CLICKHOUSE_DATABASE" \
   --query "
     SELECT
-        table,
-        sum(rows) AS rows
-    FROM system.parts
-    WHERE active
-      AND database = currentDatabase()
-      AND table IN (
-          'gold_daily_trips',
-          'gold_hourly_trips',
-          'gold_location_pair_stats',
-          'gold_payment_type_stats'
-      )
-    GROUP BY table
-    ORDER BY table
+        table_name,
+        rows_count,
+        min_date,
+        max_date,
+        periods_count
+    FROM
+    (
+        SELECT
+            '\''gold_daily_trips'\'' AS table_name,
+            count() AS rows_count,
+            min(pickup_date) AS min_date,
+            max(pickup_date) AS max_date,
+            uniqExact(toYYYYMM(pickup_date)) AS periods_count
+        FROM nyc_taxi.gold_daily_trips
+
+        UNION ALL
+
+        SELECT
+            '\''gold_hourly_trips'\'' AS table_name,
+            count() AS rows_count,
+            min(pickup_date) AS min_date,
+            max(pickup_date) AS max_date,
+            uniqExact(toYYYYMM(pickup_date)) AS periods_count
+        FROM nyc_taxi.gold_hourly_trips
+
+        UNION ALL
+
+        SELECT
+            '\''gold_payment_type_stats'\'' AS table_name,
+            count() AS rows_count,
+            min(pickup_date) AS min_date,
+            max(pickup_date) AS max_date,
+            uniqExact(toYYYYMM(pickup_date)) AS periods_count
+        FROM nyc_taxi.gold_payment_type_stats
+
+        UNION ALL
+
+        SELECT
+            '\''gold_location_pair_stats'\'' AS table_name,
+            count() AS rows_count,
+            min(pickup_date) AS min_date,
+            max(pickup_date) AS max_date,
+            uniqExact(toYYYYMM(pickup_date)) AS periods_count
+        FROM nyc_taxi.gold_location_pair_stats
+    )
+    ORDER BY table_name
+    FORMAT PrettyCompact
   "
+'
+```
+
+Expected result for the current source:
+
+```text
+121 periods in every Gold table
+```
+
+Validate the dbt analytics mart:
+
+```bash
+docker compose exec -T clickhouse bash -lc '
+clickhouse-client \
+  --user "$CLICKHOUSE_USER" \
+  --password "$CLICKHOUSE_PASSWORD" \
+  --query "
+    SELECT
+        count() AS rows_count,
+        min(pickup_date) AS min_date,
+        max(pickup_date) AS max_date,
+        uniqExact(toYYYYMM(pickup_date)) AS periods_count
+    FROM nyc_taxi_analytics_dbt.mart_daily_trip_kpis
+    FORMAT Vertical
+  "
+'
+```
+
+Expected dbt mart result for the current source:
+
+```text
+rows_count:    3,684
+min_date:      2016-01-01
+max_date:      2026-01-31
+periods_count: 121
 ```
 
 Record:
@@ -397,6 +510,7 @@ Record:
 * total runtime;
 * final row counts;
 * period count per table;
+* dbt build result;
 * failures and retries;
 * operational observations.
 
@@ -426,9 +540,11 @@ truncate_clickhouse_gold_tables → upstream_failed
 
 ClickHouse row counts again remained unchanged.
 
+These negative scenarios validated that destructive truncation is protected by explicit runtime confirmation and raw-period range validation.
+
 ## Validated Positive Full Rebuild
 
-The protected full rebuild was successfully executed against the complete historical raw source.
+The protected full rebuild was successfully executed against the complete historical raw source available at that time.
 
 Airflow run details:
 
@@ -439,16 +555,16 @@ State:       success
 Start time:  2026-06-14 12:30:24 UTC
 End time:    2026-06-15 12:13:02 UTC
 Duration:    23 h 42 min 37 sec
-````
+```
 
 Validated source range:
 
 ```text
 raw period count:                     120
 fully processed ClickHouse periods:   120
-date range:                            2016-01 → 2025-12
-missing periods:                       none
-unexpected periods:                    none
+date range:                           2016-01 → 2025-12
+missing periods:                      none
+unexpected periods:                   none
 ```
 
 Final ClickHouse row counts:
@@ -473,7 +589,37 @@ explicit runtime confirmation
 → month-level serving-layer validation
 ```
 
-### Operational Observation
+After this historical full rebuild, the additional `2026-01` raw period was processed through the new-month pipeline and included in the current serving-layer output.
+
+## Validated Current Serving-Layer Output
+
+The current validated serving-layer output covers:
+
+```text
+121 periods
+2016-01 → 2026-01
+```
+
+Current ClickHouse Gold row counts:
+
+```text
+gold_daily_trips                 3,684
+gold_hourly_trips                265,201
+gold_payment_type_stats          52,458
+gold_location_pair_stats         39,815,396
+```
+
+Current dbt analytics mart coverage:
+
+```text
+mart_daily_trip_kpis
+rows_count:    3,684
+min_date:      2016-01-01
+max_date:      2026-01-31
+periods_count: 121
+```
+
+## Operational Observation
 
 The first attempt of `truncate_clickhouse_gold_tables` failed before executing any ClickHouse query because the script referenced an outdated variable name:
 
@@ -499,7 +645,6 @@ The completed run therefore also validated:
 * full serving-layer reconstruction after a destructive rebuild;
 * reproducibility of final period coverage and row counts.
 
-
 ## Planned Reliability Improvements
 
 Future improvements include:
@@ -509,5 +654,6 @@ Future improvements include:
 * atomic table swap;
 * rollback to the previous serving-layer version;
 * resumable rebuild execution;
-* automated full-range final quality validation;
-* persistent rebuild metadata.
+* automated full-range final quality validation across ClickHouse Gold and dbt marts;
+* persistent rebuild metadata;
+* dbt documentation and lineage artifacts.

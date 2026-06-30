@@ -10,9 +10,14 @@ The project contains more than 300 tests covering:
 * dynamic task mapping;
 * raw period discovery;
 * protected full rebuild safety;
+* dbt analytics orchestration;
 * ClickHouse utilities and query construction;
 * data quality rules;
 * failure callbacks and Telegram alerting.
+
+The automated test suite focuses on deterministic unit, transformation, utility, and DAG-structure checks.
+
+Runtime Spark execution, ClickHouse loads, and dbt builds are validated locally through Docker Compose and Airflow.
 
 ## Test Categories
 
@@ -32,6 +37,7 @@ These tests validate:
 * environment-driven configuration;
 * Object Storage paths;
 * ClickHouse settings;
+* dbt-related runtime configuration where applicable;
 * Airflow retry and timeout defaults;
 * year/month normalization;
 * same-year and cross-year period generation;
@@ -65,6 +71,17 @@ The tests validate:
 
 Object Storage and ClickHouse responses are mocked.
 
+A month is considered fully processed only when it exists in all configured ClickHouse Gold tables:
+
+```text
+gold_daily_trips
+gold_hourly_trips
+gold_payment_type_stats
+gold_location_pair_stats
+```
+
+This protects the new-month pipeline from skipping partially loaded periods.
+
 ### Airflow DAG Structure
 
 Covered by:
@@ -73,6 +90,7 @@ Covered by:
 tests/test_full_rebuild_dag.py
 tests/test_period_refresh_dag.py
 tests/test_process_new_months_dag.py
+tests/test_dbt_analytics_dag.py
 ```
 
 The tests validate:
@@ -89,7 +107,9 @@ The tests validate:
 * retries and retry delays;
 * task-family-specific execution timeouts;
 * shared failure callbacks;
-* separation between Spark and non-Spark tasks.
+* separation between Spark and non-Spark tasks;
+* dbt analytics DAG structure;
+* dbt trigger behavior from upstream processing DAGs.
 
 #### Protected Full Rebuild DAG
 
@@ -103,9 +123,12 @@ create ClickHouse tables
 → log rebuild plan
 → truncate ClickHouse
 → process mapped months
+→ trigger dbt analytics
 ```
 
 The truncation task cannot run when configuration or raw source validation fails.
+
+After successful monthly processing, the DAG triggers the dbt analytics pipeline.
 
 #### Period Refresh DAG
 
@@ -117,7 +140,10 @@ read selected interval
 → rebuild monthly layers
 → reload ClickHouse
 → validate the month
+→ trigger dbt analytics
 ```
+
+This confirms that corrected periods are followed by a downstream analytics rebuild.
 
 #### New-Month DAG
 
@@ -128,9 +154,23 @@ discover unprocessed periods
 → clean partial month data
 → process mapped months
 → validate each loaded month
+→ trigger dbt analytics if any period was processed
 ```
 
 The no-new-period case is also supported as a successful no-op.
+
+In the no-op branch, the DAG skips the dbt trigger because no ClickHouse Gold data changed.
+
+#### dbt Analytics DAG
+
+The tests verify:
+
+```text
+dbt debug
+→ dbt build
+```
+
+They also validate that the dbt DAG is configured as a separate downstream analytics pipeline rather than being embedded inside each monthly Spark TaskGroup.
 
 ### Spark Transformation Tests
 
@@ -189,6 +229,41 @@ Detailed validation rules are documented in:
 docs/data_quality.md
 ```
 
+### dbt Analytics Validation
+
+dbt model execution and data tests are validated through the local Airflow/dbt runtime.
+
+The dbt analytics pipeline is:
+
+```text
+nyc_taxi_dbt_analytics_pipeline
+```
+
+It runs:
+
+```text
+dbt debug
+→ dbt build
+```
+
+The current successful dbt build includes:
+
+```text
+7 models
+5 sources
+80 total checks/tests
+```
+
+dbt validates downstream analytical assumptions such as:
+
+* required fields are not null;
+* accepted values are respected;
+* analytical grain is unique;
+* downstream mart logic is internally consistent;
+* duplicated analytical grains are detected.
+
+During implementation, dbt tests detected duplicated analytical grains in the historical `2021-09` period. The issue was fixed through the safe period refresh pipeline, after which the dbt build passed again.
+
 ### ClickHouse Utility and Cleanup Tests
 
 Covered modules include:
@@ -242,7 +317,7 @@ The tests validate:
 
 ## Runtime Safety Validation
 
-Automated tests are complemented by real Airflow negative runs.
+Automated tests are complemented by real Airflow negative and positive validation runs.
 
 ### Missing Confirmation
 
@@ -269,6 +344,62 @@ truncate_clickhouse_gold_tables → upstream_failed
 ClickHouse row counts again remained unchanged.
 
 These tests confirm that destructive operations are blocked by real Airflow task dependencies, not only by isolated unit-test logic.
+
+## Runtime End-to-End Validation
+
+### Validated Historical Full Rebuild
+
+The protected full rebuild was successfully executed against the full raw source available at that time:
+
+```text
+120 monthly periods
+2016-01 → 2025-12
+runtime: 23 h 42 min 37 sec
+```
+
+The run confirmed:
+
+* explicit runtime confirmation worked;
+* raw period discovery worked;
+* raw range validation worked;
+* ClickHouse truncation was protected by upstream checks;
+* all selected periods were processed through mapped monthly TaskGroups;
+* each month passed ClickHouse month-level quality validation;
+* final row counts matched the captured baseline.
+
+### New-Month Processing
+
+The `2026-01` raw period was added later and processed through:
+
+```text
+nyc_taxi_process_new_months_pipeline
+```
+
+Runtime validation confirmed:
+
+```text
+new raw period 2026-01
+→ discovered by new-month processing
+→ processed through Spark and ClickHouse
+→ triggered dbt analytics pipeline
+→ dbt build passed
+```
+
+### Period Refresh with dbt Validation
+
+A historical duplicate-grain issue was detected by dbt tests in the `2021-09` period.
+
+Runtime validation confirmed:
+
+```text
+duplicated analytical grains in 2021-09
+→ detected by dbt tests
+→ fixed through nyc_taxi_period_refresh_pipeline
+→ dbt analytics pipeline triggered automatically
+→ dbt build passed after refresh
+```
+
+This validated the full correction path from analytics-layer failure detection to safe monthly period replacement.
 
 ## Running Tests
 
@@ -312,7 +443,20 @@ docker compose exec airflow bash -lc \
 tests/test_full_rebuild_dag.py \
 tests/test_period_refresh_dag.py \
 tests/test_process_new_months_dag.py \
+tests/test_dbt_analytics_dag.py \
 -v"
+```
+
+Run dbt analytics task checks through Airflow:
+
+```bash
+docker compose exec airflow bash -lc \
+"airflow tasks test nyc_taxi_dbt_analytics_pipeline dbt_debug 2026-01-03"
+```
+
+```bash
+docker compose exec airflow bash -lc \
+"airflow tasks test nyc_taxi_dbt_analytics_pipeline dbt_build_analytics_layer 2026-01-03"
 ```
 
 ## GitHub Actions CI
@@ -331,7 +475,10 @@ CI runs:
 * Spark transformation tests;
 * data quality tests;
 * full rebuild safety tests;
+* dbt orchestration structure tests;
 * ClickHouse utility and cleanup tests;
 * callback and Telegram tests with mocked external calls.
 
-Most tests do not require live Object Storage, ClickHouse, or Telegram access because external calls are mocked.
+Most tests do not require live Object Storage, ClickHouse, dbt runtime, or Telegram access because external calls are mocked or validated through structure-level tests.
+
+Runtime Spark execution, ClickHouse loads, and dbt builds are validated locally through Docker Compose and Airflow rather than in GitHub Actions CI.
