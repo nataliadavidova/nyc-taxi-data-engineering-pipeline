@@ -10,6 +10,11 @@ services:
       - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U airflow -d airflow" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   clickhouse:
     image: clickhouse/clickhouse-server:25.8.24.21
@@ -30,8 +35,10 @@ services:
       dockerfile: docker/airflow/Dockerfile
     container_name: nyc_taxi_airflow_init
     depends_on:
-      - postgres
-      - clickhouse
+      postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_started
     env_file:
       - .env
     environment:
