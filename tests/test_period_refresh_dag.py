@@ -8,6 +8,7 @@ import pytest
 airflow = pytest.importorskip("airflow")
 from airflow.models import DagBag
 from airflow.utils.trigger_rule import TriggerRule
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +91,7 @@ def test_period_refresh_dag_contains_top_level_tasks(period_refresh_dag):
         "read_period_refresh_config",
         "log_period_refresh_periods",
         "finish",
+        "trigger_dbt_analytics_pipeline",
     }
 
     assert expected_tasks.issubset(task_ids)
@@ -140,11 +142,12 @@ def test_period_refresh_dag_does_not_use_static_month_task_ids(
 
 
 def test_period_refresh_dag_has_expected_number_of_tasks(period_refresh_dag):
-    # 4 top-level tasks:
+    # 5 top-level tasks:
     # - create_clickhouse_gold_tables
     # - read_period_refresh_config
     # - log_period_refresh_periods
     # - finish
+    # - trigger_dbt_analytics_pipeline
     #
     # 14 tasks inside mapped process_month TaskGroup:
     # - delete_clickhouse_gold_month
@@ -156,8 +159,8 @@ def test_period_refresh_dag_has_expected_number_of_tasks(period_refresh_dag):
     # - 4 ClickHouse load tasks
     # - ClickHouse month quality check
     #
-    # Total = 4 + 14 = 18
-    assert len(period_refresh_dag.task_ids) == 18
+    # Total = 5 + 14 = 19
+    assert len(period_refresh_dag.task_ids) == 19
 
 
 def test_create_tables_runs_before_config_read(period_refresh_dag):
@@ -265,6 +268,18 @@ def test_finish_runs_after_logging_and_month_processing(period_refresh_dag):
     assert finish.upstream_task_ids == expected_upstream
 
 
+def test_period_refresh_triggers_dbt_after_finish(period_refresh_dag):
+    trigger_dbt = period_refresh_dag.get_task("trigger_dbt_analytics_pipeline")
+
+    assert isinstance(trigger_dbt, TriggerDagRunOperator)
+    assert trigger_dbt.upstream_task_ids == {"finish"}
+    assert trigger_dbt.trigger_dag_id == "nyc_taxi_dbt_analytics_pipeline"
+    assert trigger_dbt.wait_for_completion is True
+    assert trigger_dbt.poke_interval == 30
+    assert trigger_dbt.reset_dag_run is True
+    assert trigger_dbt.execution_timeout == PYTHON_TASK_EXECUTION_TIMEOUT
+
+
 def test_period_refresh_spark_tasks_use_spark_pool(period_refresh_dag):
     spark_task_ids = [
         "process_month.bronze_yellow_taxi",
@@ -297,6 +312,7 @@ def test_period_refresh_non_spark_tasks_do_not_use_spark_pool(
         "process_month.delete_clickhouse_gold_month",
         "process_month.check_clickhouse_gold_month_quality",
         "finish",
+        "trigger_dbt_analytics_pipeline",
     ]
 
     for task_id in non_spark_task_ids:
@@ -361,6 +377,7 @@ def test_period_refresh_non_spark_tasks_use_python_execution_timeout(
         "log_period_refresh_periods",
         "process_month.delete_clickhouse_gold_month",
         "process_month.check_clickhouse_gold_month_quality",
+        "trigger_dbt_analytics_pipeline",
     ]
 
     for task_id in non_spark_task_ids:
