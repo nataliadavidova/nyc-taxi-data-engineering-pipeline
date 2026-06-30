@@ -15,6 +15,13 @@ jobs:
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
       AIRFLOW__CORE__UNIT_TEST_MODE: "true"
 
+      CLICKHOUSE_HOST: "clickhouse"
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_DATABASE: "nyc_taxi"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: "test_password"
+      DBT_TARGET_DATABASE: "nyc_taxi_analytics_dbt"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
