@@ -7,6 +7,7 @@ import pytest
 
 airflow = pytest.importorskip("airflow")
 from airflow.models import DagBag
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +89,7 @@ def test_dag_contains_top_level_tasks(full_rebuild_dag):
         "log_full_rebuild_plan",
         "truncate_clickhouse_gold_tables",
         "finish",
+        "trigger_dbt_analytics_pipeline",
     }
 
     assert expected_tasks.issubset(task_ids)
@@ -116,7 +118,7 @@ def test_dag_contains_process_month_task_group_tasks(full_rebuild_dag):
 
 
 def test_dag_has_expected_number_of_tasks(full_rebuild_dag):
-    # 7 top-level service and safety tasks:
+    # 8 top-level service, safety and orchestration tasks:
     # - create_clickhouse_gold_tables
     # - validate_full_rebuild_config
     # - discover_full_rebuild_raw_periods
@@ -124,11 +126,12 @@ def test_dag_has_expected_number_of_tasks(full_rebuild_dag):
     # - log_full_rebuild_plan
     # - truncate_clickhouse_gold_tables
     # - finish
+    # - trigger_dbt_analytics_pipeline
     #
     # 13 tasks inside the dynamically mapped process_month TaskGroup.
     #
-    # Total = 7 + 13 = 20
-    assert len(full_rebuild_dag.task_ids) == 20
+    # Total = 8 + 13 = 21
+    assert len(full_rebuild_dag.task_ids) == 21
 
 
 def test_create_tables_runs_before_full_rebuild_validation(full_rebuild_dag):
@@ -291,6 +294,18 @@ def test_finish_runs_after_month_processing(full_rebuild_dag):
     }
 
 
+def test_full_rebuild_triggers_dbt_after_finish(full_rebuild_dag):
+    trigger_dbt = full_rebuild_dag.get_task("trigger_dbt_analytics_pipeline")
+
+    assert isinstance(trigger_dbt, TriggerDagRunOperator)
+    assert trigger_dbt.upstream_task_ids == {"finish"}
+    assert trigger_dbt.trigger_dag_id == "nyc_taxi_dbt_analytics_pipeline"
+    assert trigger_dbt.wait_for_completion is True
+    assert trigger_dbt.poke_interval == 30
+    assert trigger_dbt.reset_dag_run is True
+    assert trigger_dbt.execution_timeout == PYTHON_TASK_EXECUTION_TIMEOUT
+
+
 def test_spark_tasks_use_spark_pool(full_rebuild_dag):
     spark_task_ids = [
         "process_month.bronze_yellow_taxi",
@@ -323,6 +338,7 @@ def test_non_spark_tasks_do_not_use_spark_pool(full_rebuild_dag):
         "truncate_clickhouse_gold_tables",
         "finish",
         "process_month.check_clickhouse_gold_month_quality",
+        "trigger_dbt_analytics_pipeline",
     ]
 
     for task_id in non_spark_task_ids:
@@ -395,6 +411,7 @@ def test_python_tasks_use_python_execution_timeout(full_rebuild_dag):
         "log_full_rebuild_plan",
         "truncate_clickhouse_gold_tables",
         "process_month.check_clickhouse_gold_month_quality",
+        "trigger_dbt_analytics_pipeline",
     ]
 
     for task_id in python_task_ids:

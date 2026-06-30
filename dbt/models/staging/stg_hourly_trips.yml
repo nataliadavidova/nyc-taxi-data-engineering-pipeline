@@ -1,0 +1,58 @@
+version: 2
+
+models:
+  - name: stg_hourly_trips
+    description: >
+      Staging view over the Spark-managed gold_hourly_trips table.
+      The model preserves the grain of pickup date, pickup hour,
+      and trip type for downstream hourly analytics.
+
+    columns:
+      - name: pickup_date
+        description: Calendar date of taxi trip pickup activity.
+        data_tests:
+          - not_null
+
+      - name: pickup_hour
+        description: Hour of day in the range from 0 to 23.
+        data_tests:
+          - not_null
+
+      - name: trip_type
+        description: Trip distance category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - short
+                  - medium
+                  - long
+
+      - name: trips_count
+        description: Number of trips for the date, hour, and trip type.
+        data_tests:
+          - not_null
+
+      - name: total_revenue
+        description: Total revenue for the date, hour, and trip type.
+        data_tests:
+          - not_null
+
+      - name: avg_check
+        description: Average revenue per trip.
+
+      - name: avg_trip_distance
+        description: Average trip distance.
+
+      - name: avg_trip_duration_minutes
+        description: Average trip duration in minutes.
+
+      - name: year
+        description: Source year partition value.
+
+      - name: month
+        description: Source month partition value.
+
+      - name: gold_load_timestamp
+        description: Timestamp when the Gold record was generated.

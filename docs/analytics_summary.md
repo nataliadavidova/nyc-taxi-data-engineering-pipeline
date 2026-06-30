@@ -1,8 +1,18 @@
 # NYC Taxi Analytical Summary
 
-This document summarizes the main analytical findings for the NYC Yellow Taxi data engineering project.
+This document summarizes the main business and analytical findings for the NYC Yellow Taxi data engineering project.
 
-The analysis is based on the full year 2024 and uses gold marts loaded into ClickHouse.
+The analysis is based on the full year 2024 and uses validated ClickHouse Gold marts produced by the Spark pipeline.
+
+The current data platform contains a broader historical dataset covering:
+
+```text
+2016-01 → 2026-01
+```
+
+However, this analytical summary intentionally focuses on the 2024 calendar year as a representative business-analysis snapshot. The 2024 scope keeps the analysis comparable across months, avoids partial-year interpretation issues, and provides a clean baseline for demand, revenue, payment, route, and grouped-ride opportunity analysis.
+
+At the current stage, the analytical SQL queries in this document use the original ClickHouse Gold marts directly. The project also includes a downstream dbt analytics layer, but Superset dashboards and the SQL analysis in this document have not yet been migrated to dbt marts.
 
 ## Executive Summary
 
@@ -25,7 +35,7 @@ The analysis shows five main business patterns:
 
 ## Methodology Notes
 
-The analysis uses aggregated gold marts in ClickHouse:
+The analysis uses aggregated ClickHouse Gold marts:
 
 ```text
 nyc_taxi.gold_daily_trips
@@ -34,7 +44,9 @@ nyc_taxi.gold_location_pair_stats
 nyc_taxi.gold_payment_type_stats
 ```
 
-Because gold marts are already aggregated, metrics are calculated using summed values:
+These marts are produced by the Spark pipeline and validated through the project’s Silver, Gold Object Storage, and ClickHouse quality gates before being used for analytics.
+
+Because Gold marts are already aggregated, metrics are calculated using summed values:
 
 ```text
 trip volume = sum(trips_count)
@@ -66,11 +78,24 @@ long    — trip_distance > 10 miles
 
 Passenger motivation is not directly available in the dataset. It is inferred from trip type, time, zones, routes, payment behavior, and airport-related flows.
 
-Detailed SQL logic is stored in:
+The project now also includes a dbt analytics layer in:
+
+```text
+dbt/
+```
+
+The dbt layer reads validated ClickHouse Gold tables as sources and builds downstream analytical models in:
+
+```text
+nyc_taxi_analytics_dbt
+```
+
+This document, however, keeps the original 2024 business analysis based on the ClickHouse Gold marts and SQL queries stored in:
 
 ```text
 sql/analytics/
 ```
+
 
 ## Analytical Findings
 
@@ -668,7 +693,7 @@ The model is not a full profit calculation. It separates three different concept
 3. full profit impact.
 ```
 
-Only the first two can be estimated from the current dataset. Full profit impact requires additional operational cost data.
+Only the first two can be estimated from the 2024 analytical snapshot. Full profit impact requires additional operational cost data.
 
 ### Model Assumptions
 
@@ -826,7 +851,7 @@ direct_fare_impact
 - additional_waiting_time_costs
 ```
 
-The current dataset does not contain the operational cost data required to calculate full profit impact.
+The 2024 analytical snapshot does not contain the operational cost data required to calculate full profit impact.
 
 ### Business Interpretation
 
@@ -864,6 +889,8 @@ The analysis supports the following strategic priorities:
 ## Limitations and Additional Data Needs
 
 The dataset does not contain direct passenger intent or trip purpose. Passenger motives are inferred from time, location, trip distance, payment behavior, and demand patterns.
+
+This document focuses on the 2024 calendar year. The current data platform contains a broader historical range, but business patterns may vary across years due to seasonality, market changes, airport traffic, pricing rules, external events, and post-2024 data behavior. For production-grade strategy, the same analysis should be repeated across multiple years and compared against the 2024 baseline.
 
 The analysis would be stronger with additional data sources:
 
@@ -907,6 +934,8 @@ Analytical queries are stored in:
 ```text
 sql/analytics/
 ```
+
+These SQL files currently query the validated ClickHouse Gold marts directly. A future improvement is to migrate selected analytical queries and Superset datasets to dbt marts where appropriate.
 
 Main analytical query files:
 

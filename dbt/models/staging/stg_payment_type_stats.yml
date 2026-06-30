@@ -1,0 +1,87 @@
+version: 2
+
+models:
+  - name: stg_payment_type_stats
+    description: >
+      Staging view over the Spark-managed gold_payment_type_stats table.
+      The model preserves the grain of pickup date, trip type, and payment type
+      for downstream payment-method analytics.
+
+    columns:
+      - name: pickup_date
+        description: Calendar date of taxi trip pickup activity.
+        data_tests:
+          - not_null
+
+      - name: trip_type
+        description: Trip distance category.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - short
+                  - medium
+                  - long
+
+      - name: payment_type
+        description: Numeric NYC Taxi payment type code.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - 0
+                  - 1
+                  - 2
+                  - 3
+                  - 4
+                  - 5
+                quote: false
+
+      - name: payment_type_name
+        description: Human-readable payment type name.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - Unknown
+                  - Credit card
+                  - Cash
+                  - No charge
+                  - Dispute
+                  - Other
+
+      - name: trips_count
+        description: Number of trips for the date, trip type, and payment type.
+        data_tests:
+          - not_null
+
+      - name: total_revenue
+        description: Total revenue for the date, trip type, and payment type.
+        data_tests:
+          - not_null
+
+      - name: avg_check
+        description: Average revenue per trip.
+
+      - name: total_tips
+        description: Total tips for the date, trip type, and payment type.
+        data_tests:
+          - not_null
+
+      - name: avg_tip
+        description: Average tip per trip.
+
+      - name: tips_share_from_revenue
+        description: Share of tips in total revenue.
+
+      - name: year
+        description: Source year partition value.
+
+      - name: month
+        description: Source month partition value.
+
+      - name: gold_load_timestamp
+        description: Timestamp when the Gold record was generated.

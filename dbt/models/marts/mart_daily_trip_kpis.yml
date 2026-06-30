@@ -1,0 +1,141 @@
+version: 2
+
+models:
+  - name: mart_daily_trip_kpis
+    description: >
+      Daily KPI mart for BI dashboards. Provides one row per pickup_date
+      with trip volume, revenue, average trip metrics, calendar attributes,
+      trip type composition shares, and BI-ready labels.
+
+    columns:
+      - name: pickup_date
+        description: Calendar date of taxi trip pickup activity.
+        data_tests:
+          - not_null
+          - unique
+
+      - name: pickup_month
+        description: First day of the pickup month.
+        data_tests:
+          - not_null
+
+      - name: pickup_month_label
+        description: Month label in YYYY-MM format for BI dashboards.
+        data_tests:
+          - not_null
+
+      - name: pickup_year
+        description: Calendar year extracted from pickup_date.
+        data_tests:
+          - not_null
+
+      - name: pickup_month_number
+        description: Month number extracted from pickup_date.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - 1
+                  - 2
+                  - 3
+                  - 4
+                  - 5
+                  - 6
+                  - 7
+                  - 8
+                  - 9
+                  - 10
+                  - 11
+                  - 12
+                quote: false
+
+      - name: day_of_week
+        description: Day of week extracted from pickup_date.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - 1
+                  - 2
+                  - 3
+                  - 4
+                  - 5
+                  - 6
+                  - 7
+                quote: false
+
+      - name: is_weekend
+        description: Boolean flag indicating whether pickup_date falls on a weekend.
+        data_tests:
+          - not_null
+
+      - name: day_type
+        description: BI-friendly day type label.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - Weekday
+                  - Weekend
+
+      - name: trips_count
+        description: Total number of trips for the date.
+        data_tests:
+          - not_null
+
+      - name: total_revenue
+        description: Total revenue for the date.
+        data_tests:
+          - not_null
+
+      - name: total_revenue_mln
+        description: Total revenue expressed in millions for dashboard readability.
+        data_tests:
+          - not_null
+
+      - name: avg_check
+        description: Average revenue per trip.
+
+      - name: avg_trip_distance
+        description: Average trip distance.
+
+      - name: avg_trip_duration_minutes
+        description: Average trip duration in minutes.
+
+      - name: short_trips_count
+        description: Number of trips classified as short.
+
+      - name: medium_trips_count
+        description: Number of trips classified as medium.
+
+      - name: long_trips_count
+        description: Number of trips classified as long.
+
+      - name: short_trips_share
+        description: Share of short trips in total daily trips.
+        data_tests:
+          - not_null
+
+      - name: medium_trips_share
+        description: Share of medium trips in total daily trips.
+        data_tests:
+          - not_null
+
+      - name: long_trips_share
+        description: Share of long trips in total daily trips.
+        data_tests:
+          - not_null
+
+      - name: dominant_trip_type
+        description: Trip type with the highest share for the date.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - short
+                  - medium
+                  - long

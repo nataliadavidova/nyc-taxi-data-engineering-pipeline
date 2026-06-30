@@ -12,4 +12,5 @@ RUN pip install --no-cache-dir \
     pyspark==3.5.1 \
     python-dotenv \
     boto3 \
-    pytest
+    pytest \
+    apache-airflow-providers-docker==3.9.1

@@ -320,3 +320,46 @@ def test_process_new_months_non_spark_tasks_use_python_execution_timeout(
         task = process_new_months_dag.get_task(task_id)
 
         assert task.execution_timeout == PYTHON_TASK_EXECUTION_TIMEOUT
+
+
+import importlib.util
+
+def load_process_new_months_dag_module():
+    dag_file = DAGS_DIR / "nyc_taxi_process_new_months_pipeline.py"
+
+    spec = importlib.util.spec_from_file_location(
+        "nyc_taxi_process_new_months_pipeline",
+        dag_file,
+    )
+    module = importlib.util.module_from_spec(spec)
+
+    assert spec.loader is not None
+
+    spec.loader.exec_module(module)
+
+    return module
+
+
+def test_choose_dbt_trigger_path_skips_dbt_when_no_new_periods():
+    module = load_process_new_months_dag_module()
+
+    assert (
+        module.choose_dbt_trigger_task_id([])
+        == module.SKIP_DBT_ANALYTICS_TASK_ID
+    )
+
+
+def test_choose_dbt_trigger_path_triggers_dbt_when_new_periods_exist():
+    module = load_process_new_months_dag_module()
+
+    discovered_periods = [
+        {
+            "year": "2026",
+            "month": "01",
+        }
+    ]
+
+    assert (
+        module.choose_dbt_trigger_task_id(discovered_periods)
+        == module.TRIGGER_DBT_ANALYTICS_TASK_ID
+    )

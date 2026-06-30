@@ -1,0 +1,52 @@
+version: 2
+
+models:
+  - name: stg_daily_trips
+    description: >
+      Staging view over the Spark-managed gold_daily_trips table.
+      The model preserves the daily grain and exposes an explicit,
+      stable column contract for downstream dbt models.
+
+    columns:
+      - name: pickup_date
+        description: Calendar date of taxi trip pickup activity.
+        data_tests:
+          - not_null
+          - unique
+
+      - name: trips_count
+        description: Total number of validated trips for the date.
+        data_tests:
+          - not_null
+
+      - name: total_revenue
+        description: Total trip revenue for the date.
+        data_tests:
+          - not_null
+
+      - name: avg_check
+        description: Average revenue per trip for the date.
+
+      - name: avg_trip_distance
+        description: Average trip distance for the date.
+
+      - name: avg_trip_duration_minutes
+        description: Average trip duration in minutes for the date.
+
+      - name: short_trips_count
+        description: Number of trips classified as short.
+
+      - name: medium_trips_count
+        description: Number of trips classified as medium.
+
+      - name: long_trips_count
+        description: Number of trips classified as long.
+
+      - name: year
+        description: Source year partition value.
+
+      - name: month
+        description: Source month partition value.
+
+      - name: gold_load_timestamp
+        description: Timestamp when the Gold record was generated.

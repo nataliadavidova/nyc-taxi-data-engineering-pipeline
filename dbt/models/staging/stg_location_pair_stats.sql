@@ -1,0 +1,20 @@
+select
+    pickup_date,
+    trip_type,
+    pickup_location_id,
+    pickup_borough,
+    pickup_zone,
+    pickup_service_zone,
+    dropoff_location_id,
+    dropoff_borough,
+    dropoff_zone,
+    dropoff_service_zone,
+    trips_count,
+    total_revenue,
+    avg_check,
+    avg_trip_distance,
+    avg_trip_duration_minutes,
+    year,
+    month,
+    gold_load_timestamp
+from {{ source('nyc_taxi_spark_gold', 'gold_location_pair_stats') }}

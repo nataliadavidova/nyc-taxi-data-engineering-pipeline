@@ -1,0 +1,113 @@
+version: 2
+
+models:
+  - name: int_daily_trip_metrics
+    description: >
+      Intermediate daily trip metrics model built on top of stg_daily_trips.
+      Adds calendar attributes and trip type share calculations while preserving
+      one row per pickup_date.
+
+    columns:
+      - name: pickup_date
+        description: Calendar date of taxi trip pickup activity.
+        data_tests:
+          - not_null
+          - unique
+
+      - name: pickup_month
+        description: First day of the pickup month.
+        data_tests:
+          - not_null
+
+      - name: pickup_year
+        description: Calendar year extracted from pickup_date.
+        data_tests:
+          - not_null
+
+      - name: pickup_month_number
+        description: Month number extracted from pickup_date.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - 1
+                  - 2
+                  - 3
+                  - 4
+                  - 5
+                  - 6
+                  - 7
+                  - 8
+                  - 9
+                  - 10
+                  - 11
+                  - 12
+                quote: false
+
+      - name: day_of_week
+        description: Day of week extracted from pickup_date.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values:
+                  - 1
+                  - 2
+                  - 3
+                  - 4
+                  - 5
+                  - 6
+                  - 7
+                quote: false
+
+      - name: is_weekend
+        description: Boolean flag indicating whether pickup_date falls on a weekend.
+        data_tests:
+          - not_null
+
+      - name: trips_count
+        description: Total number of trips for the date.
+        data_tests:
+          - not_null
+
+      - name: total_revenue
+        description: Total revenue for the date.
+        data_tests:
+          - not_null
+
+      - name: avg_check
+        description: Average revenue per trip.
+
+      - name: avg_trip_distance
+        description: Average trip distance.
+
+      - name: avg_trip_duration_minutes
+        description: Average trip duration in minutes.
+
+      - name: short_trips_count
+        description: Number of trips classified as short.
+
+      - name: medium_trips_count
+        description: Number of trips classified as medium.
+
+      - name: long_trips_count
+        description: Number of trips classified as long.
+
+      - name: short_trips_share
+        description: Share of short trips in total daily trips.
+        data_tests:
+          - not_null
+
+      - name: medium_trips_share
+        description: Share of medium trips in total daily trips.
+        data_tests:
+          - not_null
+
+      - name: long_trips_share
+        description: Share of long trips in total daily trips.
+        data_tests:
+          - not_null
+
+      - name: gold_load_timestamp
+        description: Timestamp when the underlying Gold record was generated.

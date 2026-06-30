@@ -11,47 +11,61 @@ The current project is a local portfolio implementation, but the monitoring desi
 - validate row counts and data completeness;
 - prevent bad data from reaching BI dashboards;
 - monitor the ClickHouse analytical serving layer;
+- monitor dbt analytics builds and data tests;
 - ensure Superset dashboards remain usable and trustworthy.
 
 ## Pipeline Overview
 
-The project processes full-year 2024 NYC Yellow Taxi data using the following architecture:
+The project processes historical NYC Yellow Taxi data using a medallion-style batch architecture with a downstream dbt analytics layer:
 
 ```text
-raw → bronze → silver → gold → ClickHouse → Superset
+raw → bronze → silver → gold → ClickHouse Gold → dbt analytics → Superset
+```
+
+The current raw source contains:
+
+```text
+121 monthly periods
+2016-01 → 2026-01
 ```
 
 Main components:
 
-- **Object Storage** stores raw, bronze, silver, gold, bad records, and quality reports;
-- **Spark** performs batch data processing and transformations;
-- **Airflow** orchestrates monthly pipeline tasks and dependencies;
-- **ClickHouse** stores business-ready analytical marts for BI;
-- **Superset** provides dashboards and data exploration;
-- **GitHub Actions** validates configuration helpers, DAG imports, and Airflow task dependencies.
+* **Object Storage** stores raw, bronze, silver, gold, bad records, and quality reports;
+* **Spark** performs batch data processing and transformations;
+* **Airflow** orchestrates full rebuild, period refresh, new-month processing, and dbt analytics builds;
+* **ClickHouse** stores validated Gold marts and dbt analytics models;
+* **dbt** builds and tests downstream analytical models;
+* **Superset** provides dashboards and data exploration on top of validated ClickHouse Gold marts;
+* **GitHub Actions** validates configuration helpers, DAG imports, Airflow task dependencies, and orchestration structure.
 
-## Current Runtime Baseline
+At the current stage, Superset dashboards still query ClickHouse Gold marts directly. Connecting selected Superset datasets to dbt marts is a planned BI-layer improvement.
 
-The current runtime baseline is based on the latest successful full-year local Airflow DAG run after the optimization pass.
+## Historical 2024 Runtime Baseline
 
-| Metric | Value |
-|---|---:|
-| Full DAG runtime before optimization | ~2h 02m |
-| Full DAG runtime after optimization | ~1h 39m |
-| Runtime reduction | ~23 minutes |
-| Relative improvement | ~18.9% |
+The runtime baseline below is based on the earlier successful full-year 2024 local Airflow DAG run after the optimization pass.
 
-The latest successful optimized DAG run completed in approximately:
+| Metric                               |       Value |
+| ------------------------------------ | ----------: |
+| Full DAG runtime before optimization |     ~2h 02m |
+| Full DAG runtime after optimization  |     ~1h 39m |
+| Runtime reduction                    | ~23 minutes |
+| Relative improvement                 |      ~18.9% |
+
+The latest successful optimized 2024 DAG run completed in approximately:
 
 ```text
 99.66 minutes
 ```
 
-These values are based on local Docker execution and should be recalibrated if the pipeline is moved to cloud or production infrastructure.
+These values are based on local Docker execution for the 2024-only benchmark and should not be interpreted as runtime expectations for the current full historical serving layer covering `2016-01 → 2026-01`.
 
-## Task Runtime Baseline
+Runtime thresholds should be recalibrated if the pipeline is moved to cloud infrastructure or if full historical rebuild monitoring is required.
 
-The table below summarizes task duration statistics from the latest successful full-year DAG run.
+
+## Historical 2024 Task Runtime Baseline
+
+The table below summarizes task duration statistics from the latest successful 2024-only full-year DAG run.
 
 | Task family | Tasks | Median runtime, min | Max runtime, min |
 |---|---:|---:|---:|
@@ -69,9 +83,42 @@ The table below summarizes task duration statistics from the latest successful f
 | `load_gold_hourly_trips_to_clickhouse` | 12 | 0.35 | 0.41 |
 | `check_clickhouse_gold_quality` | 1 | 0.01 | 0.01 |
 
+### Future Full-Historical Runtime Baseline
+
+The current task runtime baseline is based on the historical 2024-only benchmark.
+
+As a future monitoring improvement, the project should extract task runtime statistics from the validated full historical Airflow run and use them to recalibrate execution timeouts and monitoring thresholds for the complete historical pipeline.
+
+The already validated full rebuild can be used to analyze runtime behavior for:
+
+```text
+2016-01 → 2025-12
+120 monthly periods
+```
+
+The current serving layer also contains `2026-01`, which was processed later through the new-month pipeline. A complete `121`-period full-rebuild runtime baseline should be captured after a future full rebuild covering:
+
+```text
+2016-01 → 2026-01
+121 monthly periods
+```
+
+The runtime analysis should include:
+
+* total DAG runtime;
+* runtime by task family;
+* median, p90, and max runtime per task family;
+* slowest monthly periods;
+* Spark-heavy task duration distribution;
+* ClickHouse load duration distribution;
+* dbt analytics build duration;
+* comparison against current Airflow `execution_timeout` values.
+
+This information can be extracted from the Airflow metadata database if the historical DAG runs are still available.
+
 ## Runtime Thresholds and Airflow Execution Timeouts
 
-The thresholds below are initial local thresholds based on the latest successful full-year DAG run.
+The thresholds below are initial local thresholds based on the latest successful 2024-only full-year DAG run.
 
 They are intentionally higher than the observed maximum values to avoid noisy alerts, but low enough to catch meaningful runtime regressions.
 
@@ -166,23 +213,27 @@ Airflow should be the primary orchestration monitoring layer.
 
 The most important tasks to monitor are:
 
-- `bronze_yellow_taxi_*`
-- `silver_yellow_taxi_*`
-- `check_yellow_taxi_quality_*`
-- `gold_daily_trips_*`
-- `gold_hourly_trips_*`
-- `gold_payment_type_stats_*`
-- `gold_location_pair_stats_*`
-- `check_gold_schema_*`
-- `load_gold_*_to_clickhouse_*`
-- `check_clickhouse_gold_quality`
+* `bronze_yellow_taxi_*`
+* `silver_yellow_taxi_*`
+* `check_yellow_taxi_quality_*`
+* `gold_daily_trips_*`
+* `gold_hourly_trips_*`
+* `gold_payment_type_stats_*`
+* `gold_location_pair_stats_*`
+* `check_gold_schema_*`
+* `load_gold_*_to_clickhouse_*`
+* `check_clickhouse_gold_month_quality`
+* `trigger_dbt_analytics_pipeline`
+* `dbt_debug`
+* `dbt_build_analytics_layer`
 
 ### Alert Conditions
 
 | Severity | Condition | Action |
 |---|---|---|
 | Critical | DAG failed | Investigate failed task logs immediately |
-| Critical | `check_clickhouse_gold_quality` failed | BI serving layer may be incomplete or invalid |
+| Critical | `check_clickhouse_gold_month_quality` failed | Monthly serving-layer output may be incomplete or invalid |
+| Critical | `dbt_build_analytics_layer` failed | Downstream analytics layer may be invalid or out of sync |
 | High | Any Silver job failed | Investigate data quality or Spark processing |
 | High | Any ClickHouse load job failed | Serving layer may be incomplete |
 | Medium | Any task retried | Review logs and runtime |
@@ -289,8 +340,9 @@ Data quality is checked at several layers:
 
 1. Silver layer quality checks;
 2. Gold Object Storage schema and quality checks;
-3. ClickHouse final serving-layer quality checks;
-4. Superset dashboard validation.
+3. ClickHouse month-level serving-layer quality checks;
+4. dbt analytics model and data tests;
+5. Superset dashboard validation.
 
 ## Silver Layer Quality Monitoring
 
@@ -378,11 +430,21 @@ It validates that:
 | `gold_location_pair_stats` | Pickup/dropoff route-level statistics |
 | `taxi_zone_centroids` | Geospatial lookup for Superset maps |
 
-### Expected Full-Year Date Range
+### Expected Current Serving-Layer Date Range
+
+The current validated serving-layer output covers:
 
 ```text
-2024-01-01 → 2024-12-31
+2016-01-01 → 2026-01-31
 ```
+
+Expected period coverage:
+
+```text
+121 periods in every configured ClickHouse Gold table
+```
+
+The historical 2024-only range is still useful as an optimization benchmark, but it is no longer the current full serving-layer coverage.
 
 ### ClickHouse Alert Rules
 
@@ -394,6 +456,52 @@ It validates that:
 | High | Location zones are empty | Check lookup enrichment |
 | High | Payment type names are empty | Check payment mapping |
 | Medium | Row counts are lower than expected | Compare Object Storage Gold and ClickHouse |
+
+## dbt Analytics Monitoring
+
+The dbt analytics layer is orchestrated by Airflow through:
+
+```text
+nyc_taxi_dbt_analytics_pipeline
+```
+
+The DAG runs:
+
+```text
+dbt debug
+→ dbt build
+```
+
+### What to Monitor
+
+| Metric                                  | Description                                             | Expected Result                  |
+| --------------------------------------- | ------------------------------------------------------- | -------------------------------- |
+| `dbt_debug` task status                 | dbt project, profile, and ClickHouse connectivity check | `success`                        |
+| `dbt_build_analytics_layer` task status | dbt models and tests execution                          | `success`                        |
+| dbt test result                         | Analytical model quality and grain validation           | no failed tests                  |
+| dbt mart date coverage                  | Coverage of downstream analytical mart                  | matches ClickHouse Gold coverage |
+| dbt mart row count                      | Expected mart grain, currently one row per pickup date  | matches expected date count      |
+
+### Current Expected dbt Mart Coverage
+
+```text
+database:       nyc_taxi_analytics_dbt
+mart:           mart_daily_trip_kpis
+date range:     2016-01-01 → 2026-01-31
+periods_count:  121
+rows_count:     3,684
+```
+
+### dbt Alert Rules
+
+| Severity | Condition                                          | Action                                                                                |
+| -------- | -------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| Critical | `dbt debug` failed                                 | Check dbt profile, environment variables, Docker network, and ClickHouse connectivity |
+| Critical | `dbt build` failed                                 | Inspect failed model or test logs                                                     |
+| High     | dbt mart date range does not match ClickHouse Gold | Rebuild dbt analytics layer after validating ClickHouse Gold                          |
+| High     | dbt uniqueness or grain test failed                | Investigate duplicate analytical grains in source Gold tables or dbt models           |
+| Medium   | dbt runtime increased significantly                | Check ClickHouse performance and model complexity                                     |
+
 
 ## Taxi Zone Centroid Lookup Monitoring
 
@@ -483,8 +591,10 @@ When a pipeline issue occurs, the recommended response flow is:
     - Silver;
     - Gold;
     - ClickHouse load;
-    - final quality check;
+    - ClickHouse month-level quality check;
+    - dbt analytics build or data tests;
     - Superset dashboard.
+
 4. Check relevant Object Storage path or ClickHouse table.
 5. Re-run the failed task if the issue was transient.
 6. Re-run the affected month if the issue corrupted downstream data.
@@ -505,16 +615,18 @@ Future improvements may include:
 - automated comparison between Object Storage Gold and ClickHouse rows;
 - alerting on bad records share spikes;
 - Superset dashboard availability checks;
+- extract full historical task runtime statistics from Airflow metadata and recalibrate monitoring thresholds for the complete multi-year pipeline;
 - data freshness checks for BI users.
 
 ## Summary
 
-This monitoring plan defines how to track the health of the NYC Taxi data pipeline across orchestration, Spark processing, data quality validation, ClickHouse serving tables, and Superset dashboards.
+This monitoring plan defines how to track the health of the NYC Taxi data pipeline across orchestration, Spark processing, data quality validation, ClickHouse serving tables, dbt analytics models, and Superset dashboards.
 
 The most important monitoring priorities are:
 
 1. Airflow DAG success/failure with structured failure messages and optional Telegram alerts;
 2. monthly Silver job runtime SLA;
 3. Silver and Gold data quality checks;
-4. final ClickHouse full-year quality check;
-5. Superset dashboard availability.
+4. ClickHouse month-level and full-range serving-layer validation;
+5. dbt analytics build and data-test validation;
+6. Superset dashboard availability.

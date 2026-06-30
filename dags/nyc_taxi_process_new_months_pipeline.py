@@ -41,6 +41,7 @@ from airflow.decorators import task, task_group
 from airflow.operators.bash import BashOperator
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 from config import (
     AIRFLOW_JOBS_DIR,
@@ -115,6 +116,24 @@ default_args = {
 }
 
 DiscoveredPeriod = Dict[str, str]
+
+
+DBT_ANALYTICS_DAG_ID = "nyc_taxi_dbt_analytics_pipeline"
+TRIGGER_DBT_ANALYTICS_TASK_ID = "trigger_dbt_analytics_pipeline"
+SKIP_DBT_ANALYTICS_TASK_ID = "skip_dbt_analytics_pipeline"
+
+
+def choose_dbt_trigger_task_id(
+    discovered_periods: List[DiscoveredPeriod],
+) -> str:
+    """
+    Return dbt trigger branch task id based on discovered raw periods.
+    """
+
+    if discovered_periods:
+        return TRIGGER_DBT_ANALYTICS_TASK_ID
+
+    return SKIP_DBT_ANALYTICS_TASK_ID
 
 
 def get_period_year(discovered_period: DiscoveredPeriod) -> str:
@@ -484,6 +503,23 @@ def process_month(discovered_period: DiscoveredPeriod) -> None:
     ] >> check_clickhouse_gold_month_quality
 
 
+@task.branch(
+    task_id="choose_dbt_trigger_path",
+    execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+)
+def choose_dbt_trigger_path(
+    discovered_periods: List[DiscoveredPeriod],
+) -> str:
+        """
+        Decide whether to trigger the dbt analytics DAG.
+
+        If no new raw periods were discovered, the Spark pipeline is a successful
+        no-op and dbt does not need to be rebuilt.
+        """
+
+        return choose_dbt_trigger_task_id(discovered_periods)
+
+
 with DAG(
     dag_id="nyc_taxi_process_new_months_pipeline",
     default_args=default_args,
@@ -524,6 +560,21 @@ with DAG(
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     )
 
+    choose_dbt_trigger = choose_dbt_trigger_path(discovered_periods)
+
+    trigger_dbt_analytics_pipeline = TriggerDagRunOperator(
+        task_id=TRIGGER_DBT_ANALYTICS_TASK_ID,
+        trigger_dag_id=DBT_ANALYTICS_DAG_ID,
+        wait_for_completion=True,
+        poke_interval=30,
+        reset_dag_run=True,
+        execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+    )
+
+    skip_dbt_analytics_pipeline = EmptyOperator(
+        task_id=SKIP_DBT_ANALYTICS_TASK_ID,
+    )
+
     create_clickhouse_gold_tables >> discovered_periods
 
     discovered_periods >> log_periods
@@ -533,3 +584,10 @@ with DAG(
         log_periods,
         process_discovered_months,
     ] >> finish
+
+    finish >> choose_dbt_trigger
+
+    choose_dbt_trigger >> [
+        trigger_dbt_analytics_pipeline,
+        skip_dbt_analytics_pipeline,
+    ]

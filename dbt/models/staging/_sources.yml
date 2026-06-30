@@ -1,0 +1,26 @@
+version: 2
+
+sources:
+  - name: nyc_taxi_spark_gold
+    description: >
+      Validated Gold analytical tables produced by the Spark pipelines
+      and loaded into the nyc_taxi ClickHouse source database.
+      These tables are external sources for dbt and are not managed by dbt.
+
+    schema: "{{ env_var('CLICKHOUSE_DATABASE') }}"
+
+    tables:
+      - name: gold_daily_trips
+        description: Daily aggregated taxi trip metrics.
+
+      - name: gold_hourly_trips
+        description: Hourly taxi trip metrics by trip type.
+
+      - name: gold_payment_type_stats
+        description: Daily payment method metrics by trip type.
+
+      - name: gold_location_pair_stats
+        description: Daily route metrics by pickup and dropoff locations.
+
+      - name: taxi_zone_centroids
+        description: Taxi zone reference data with geographic centroids.

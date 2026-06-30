@@ -28,6 +28,7 @@ from airflow.decorators import task, task_group
 from airflow.operators.python import get_current_context
 from airflow.operators.empty import EmptyOperator
 from airflow.utils.trigger_rule import TriggerRule
+from airflow.operators.trigger_dagrun import TriggerDagRunOperator
 
 from config import (
     AIRFLOW_JOBS_DIR,
@@ -114,6 +115,10 @@ default_args = {
 }
 
 PeriodParam = Dict[str, str]
+
+
+DBT_ANALYTICS_DAG_ID = "nyc_taxi_dbt_analytics_pipeline"
+TRIGGER_DBT_ANALYTICS_TASK_ID = "trigger_dbt_analytics_pipeline"
 
 
 def get_period_year(period: PeriodParam) -> str:
@@ -668,9 +673,20 @@ with DAG(
         trigger_rule=TriggerRule.NONE_FAILED_MIN_ONE_SUCCESS,
     )
 
+
+    trigger_dbt_analytics_pipeline = TriggerDagRunOperator(
+        task_id=TRIGGER_DBT_ANALYTICS_TASK_ID,
+        trigger_dag_id=DBT_ANALYTICS_DAG_ID,
+        wait_for_completion=True,
+        poke_interval=30,
+        reset_dag_run=True,
+        execution_timeout=PYTHON_TASK_EXECUTION_TIMEOUT,
+    )
+
     create_clickhouse_gold_tables >> validated_config
     validated_config >> raw_periods
 
     log_rebuild_plan >> truncate_clickhouse_gold_tables
     truncate_clickhouse_gold_tables >> process_full_rebuild_months
     process_full_rebuild_months >> finish
+    finish >> trigger_dbt_analytics_pipeline
