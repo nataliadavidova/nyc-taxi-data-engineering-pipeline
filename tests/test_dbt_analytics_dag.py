@@ -1,21 +1,31 @@
+from pathlib import Path
+
 from airflow.models import DagBag
 
 
 DAG_ID = "nyc_taxi_dbt_analytics_pipeline"
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DAGS_DIR = PROJECT_ROOT / "dags"
+
+
+def load_dbt_analytics_dag():
+    dag_bag = DagBag(dag_folder=str(DAGS_DIR), include_examples=False)
+
+    assert dag_bag.import_errors == {}
+    assert DAG_ID in dag_bag.dags
+
+    return dag_bag.dags[DAG_ID]
+
 
 def test_dbt_analytics_dag_imports_without_errors():
-    dag_bag = DagBag(dag_folder="/opt/airflow/dags", include_examples=False)
+    dag = load_dbt_analytics_dag()
 
-    assert DAG_ID in dag_bag.dags
-    assert dag_bag.import_errors == {}
+    assert dag.dag_id == DAG_ID
 
 
 def test_dbt_analytics_dag_tasks():
-    dag_bag = DagBag(dag_folder="/opt/airflow/dags", include_examples=False)
-    dag = dag_bag.get_dag(DAG_ID)
-
-    assert dag is not None
+    dag = load_dbt_analytics_dag()
 
     task_ids = {task.task_id for task in dag.tasks}
 
@@ -26,8 +36,7 @@ def test_dbt_analytics_dag_tasks():
 
 
 def test_dbt_analytics_dag_dependencies():
-    dag_bag = DagBag(dag_folder="/opt/airflow/dags", include_examples=False)
-    dag = dag_bag.get_dag(DAG_ID)
+    dag = load_dbt_analytics_dag()
 
     dbt_debug = dag.get_task("dbt_debug")
     dbt_build = dag.get_task("dbt_build_analytics_layer")
@@ -36,8 +45,7 @@ def test_dbt_analytics_dag_dependencies():
 
 
 def test_dbt_analytics_dag_docker_operator_config():
-    dag_bag = DagBag(dag_folder="/opt/airflow/dags", include_examples=False)
-    dag = dag_bag.get_dag(DAG_ID)
+    dag = load_dbt_analytics_dag()
 
     dbt_debug = dag.get_task("dbt_debug")
     dbt_build = dag.get_task("dbt_build_analytics_layer")

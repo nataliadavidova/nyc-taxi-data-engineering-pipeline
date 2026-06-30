@@ -33,6 +33,7 @@ jobs:
           CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
 
           pip install "apache-airflow==${AIRFLOW_VERSION}" --constraint "${CONSTRAINT_URL}"
+          pip install "apache-airflow-providers-docker==3.9.1" --constraint "${CONSTRAINT_URL}"
           pip install pytest python-dotenv pyspark==3.5.1
 
       - name: Check Python syntax

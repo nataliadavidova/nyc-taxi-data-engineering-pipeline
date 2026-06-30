@@ -323,11 +323,9 @@ def test_process_new_months_non_spark_tasks_use_python_execution_timeout(
 
 
 import importlib.util
-from pathlib import Path
-
 
 def load_process_new_months_dag_module():
-    dag_file = Path("/opt/airflow/dags/nyc_taxi_process_new_months_pipeline.py")
+    dag_file = DAGS_DIR / "nyc_taxi_process_new_months_pipeline.py"
 
     spec = importlib.util.spec_from_file_location(
         "nyc_taxi_process_new_months_pipeline",
